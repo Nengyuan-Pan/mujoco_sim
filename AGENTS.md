@@ -113,7 +113,15 @@ tennis_robot/
 - 计算击打时刻和击打点：球到达球拍可及范围内的时间点
 
 ## 构建与运行命令
-- 安装依赖: `pip install -r requirements.txt`
+
+### 环境配置
+- **Windows / 通用**: 直接 `pip install -r requirements.txt`
+- **Ubuntu（仅限本机工作站）**: 使用 `env_isaaclab` conda 环境（Python 3.11，已预装 numpy/scipy/matplotlib）
+  - 激活: `conda activate env_isaaclab`
+  - 首次安装依赖: `pip install mujoco>=3.0.0 pyyaml>=6.0 pytest>=7.0 ruff>=0.1 mypy>=1.5`
+  - 后续可直接: `pip install -r requirements.txt`
+
+### 运行命令
 - 运行 iLQT 优化: `python scripts/train_ilqt.py`
 - 仿真评估: `python scripts/eval_sim.py`
 - 运行测试: `pytest tests/`
