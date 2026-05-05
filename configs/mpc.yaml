@@ -1,0 +1,42 @@
+mpc:
+  total_horizon: 200
+  fixed_horizon: 20
+  replan_interval: 15
+  max_iter_per_plan: 2
+  use_analytical: true
+  far_threshold: 200
+  near_threshold: 70
+  warm_start_alpha: 0.3
+  weight_schedule: true
+  Q_p_scale_far: 5.0
+  Q_v_scale_far: 0.1
+  Q_p_scale_near: 1.0
+  Q_v_scale_near: 10.0
+  use_bounce: true
+  bounce_restitution: 0.75
+
+weight_schedule:
+  Q_p_start_scale: 1.0
+  Q_p_end_scale: 0.5
+  Q_v_start_scale: 0.5
+  Q_v_end_scale: 2.0
+
+two_phase:
+  enabled: true
+  phase1_iters: 2
+  phase1_Q_p_scale: 5.0
+  phase1_Q_v_scale: 0.01
+  phase1_R_scale: 0.1
+  switch_distance: 0.15
+
+serve:
+  serve_distance: 22.0
+  serve_height: [2.5, 3.0]
+  target_speed_range: [15.0, 25.0]
+  reachable_probability: 0.8
+
+camera:
+  distance: 3.5
+  elevation: -15
+  azimuth: 135
+  lookat: [0.0, 0.0, 1.0]

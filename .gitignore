@@ -1,0 +1,13 @@
+.marscode/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+*.log
+
+.env
+.venv/
+venv/
+
+results/
+videos/

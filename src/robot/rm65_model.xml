@@ -1,0 +1,289 @@
+<mujoco model="rm65_tennis_robot">
+  <!--
+    RM-65 双臂机器人 MuJoCo 模型（网球挥拍场景）
+    基于 overseas_65_corrected.urdf，做如下修改：
+    1. 腰部上下自由度（platform_joint）固定
+    2. 右臂夹爪去掉，末端安装网球拍（与法兰呈90°）
+    3. 左臂保留但不驱动，用于视觉完整性
+    4. 使用 STL 网格渲染 + 简化碰撞体（capsule）
+    碰撞方案（位掩码）：
+    - 地面:         contype=1,  conaffinity=11 (1+2+8) — 与机器人、球碰撞
+    - 机器人结构:    contype=2,  conaffinity=2          — 机器人各部位之间自碰撞
+    - 球拍:         contype=4,  conaffinity=8          — 只和球碰撞
+    - 网球:         contype=8,  conaffinity=5 (1+4)    — 和地面、球拍碰撞
+    - 视觉网格:     contype=0,  conaffinity=0          — 仅渲染
+    关节轴：所有臂关节 URDF axis="0 0 1"，通过帧旋转映射到 MuJoCo 局部轴
+  -->
+  <option gravity="0 0 -9.81" timestep="0.005" integrator="implicitfast"/>
+
+  <default>
+    <default class="body_visual">
+      <geom contype="0" conaffinity="0"/>
+    </default>
+    <default class="arm_visual">
+      <geom contype="0" conaffinity="0"/>
+    </default>
+    <!-- 身体结构碰撞：不参与自碰撞，但与地面碰撞 -->
+    <default class="col_body">
+      <geom contype="1" conaffinity="1" rgba="0 0 1 0.15" group="1"/>
+    </default>
+    <!-- 臂段碰撞：参与自碰撞（臂与臂、非相邻连杆之间） -->
+    <default class="col_arm">
+      <geom contype="2" conaffinity="2" rgba="1 0 0 0.15" group="1"/>
+    </default>
+    <default class="racket">
+      <geom contype="4" conaffinity="8"/>
+    </default>
+    <default class="ball">
+      <geom contype="8" conaffinity="5"/>
+    </default>
+  </default>
+
+  <!-- 排除相邻臂段的碰撞（共享关节的连杆不应碰撞） -->
+  <!-- 以及同臂非相邻但总在穿透的 link4-link6 对 -->
+  <contact>
+    <exclude body1="r_base_link1" body2="r_link1"/>
+    <exclude body1="r_link1" body2="r_link2"/>
+    <exclude body1="r_link2" body2="r_link3"/>
+    <exclude body1="r_link3" body2="r_link4"/>
+    <exclude body1="r_link4" body2="r_link5"/>
+    <exclude body1="r_link5" body2="r_link6"/>
+    <exclude body1="r_link4" body2="r_link6"/>
+    <exclude body1="l_base_link1" body2="l_link1"/>
+    <exclude body1="l_link1" body2="l_link2"/>
+    <exclude body1="l_link2" body2="l_link3"/>
+    <exclude body1="l_link3" body2="l_link4"/>
+    <exclude body1="l_link4" body2="l_link5"/>
+    <exclude body1="l_link5" body2="l_link6"/>
+    <exclude body1="l_link4" body2="l_link6"/>
+    <!-- 球拍-球弹性碰撞：零阻尼实现完美弹性碰撞 -->
+    <pair geom1="r_racket_face" geom2="ball" condim="1" solref="-5000 0" solimp="0.9 0.99 0.001"/>
+  </contact>
+
+  <asset>
+    <!-- 底盘 & 躯干 -->
+    <mesh name="base_link_underpan" file="../../assets/rm_65/urdf/meshes/base_link_underpan.STL"/>
+    <mesh name="body_base_link"     file="../../assets/rm_65/urdf/meshes/body_base_link.STL"/>
+    <mesh name="platform_base_link" file="../../assets/rm_65/urdf/meshes/platform_base_link.STL"/>
+    <!-- 头部 -->
+    <mesh name="head_link1" file="../../assets/rm_65/urdf/meshes/head_link1.STL"/>
+    <mesh name="head_link2" file="../../assets/rm_65/urdf/meshes/head_link2.STL"/>
+    <mesh name="camera_link" file="../../assets/rm_65/urdf/meshes/camera_link.STL"/>
+    <!-- 右臂 -->
+    <mesh name="r_base_link1" file="../../assets/rm_65/urdf/meshes/r_base_link1.STL"/>
+    <mesh name="r_link1"      file="../../assets/rm_65/urdf/meshes/r_link1.STL"/>
+    <mesh name="r_link2"      file="../../assets/rm_65/urdf/meshes/r_link2.STL"/>
+    <mesh name="r_link3"      file="../../assets/rm_65/urdf/meshes/r_link3.STL"/>
+    <mesh name="r_link4"      file="../../assets/rm_65/urdf/meshes/r_link4.STL"/>
+    <mesh name="r_link5"      file="../../assets/rm_65/urdf/meshes/r_link5.STL"/>
+    <mesh name="r_link6"      file="../../assets/rm_65/urdf/meshes/r_link6.STL"/>
+    <!-- 左臂 -->
+    <mesh name="l_base_link1" file="../../assets/rm_65/urdf/meshes/l_base_link1.STL"/>
+    <mesh name="l_link1"      file="../../assets/rm_65/urdf/meshes/l_link1.STL"/>
+    <mesh name="l_link2"      file="../../assets/rm_65/urdf/meshes/l_link2.STL"/>
+    <mesh name="l_link3"      file="../../assets/rm_65/urdf/meshes/l_link3.STL"/>
+    <mesh name="l_link4"      file="../../assets/rm_65/urdf/meshes/l_link4.STL"/>
+    <mesh name="l_link5"      file="../../assets/rm_65/urdf/meshes/l_link5.STL"/>
+    <mesh name="l_link6"      file="../../assets/rm_65/urdf/meshes/l_link6.STL"/>
+    <!-- 轮子 -->
+    <mesh name="link_left_wheel"  file="../../assets/rm_65/urdf/meshes/link_left_wheel.STL"/>
+    <mesh name="link_right_wheel" file="../../assets/rm_65/urdf/meshes/link_right_wheel.STL"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 3" dir="0 0 -1" diffuse="0.9 0.9 0.9"/>
+
+    <!-- 地面（conaffinity=15=1+2+4+8，与机器人+球拍+球碰撞） -->
+    <geom type="plane" size="25 25 0.1" rgba="0.3 0.35 0.3 1" contype="1" conaffinity="15"/>
+
+    <!-- ===== 底盘 ===== -->
+    <body name="base_link_underpan" pos="0 0 0">
+      <inertial pos="-0.013 -0.016 -0.061" mass="2.55" diaginertia="0.066 0.035 0.098"/>
+      <geom type="mesh" mesh="base_link_underpan" rgba="0.15 0.15 0.2 1" class="body_visual"/>
+      <geom type="mesh" mesh="link_left_wheel" pos="0.148 0.016 -0.153" rgba="0.1 0.1 0.1 1" class="body_visual"/>
+      <geom type="mesh" mesh="link_right_wheel" pos="-0.148 0.016 -0.153" rgba="0.1 0.1 0.1 1" class="body_visual"/>
+      <!-- 底盘碰撞 -->
+      <geom name="col_underpan" type="capsule" fromto="0 0 -0.2 0 0 0.2" size="0.12" class="col_body"/>
+
+      <!-- ===== 躯干柱 ===== -->
+      <body name="body_base_link" pos="0 0 0">
+        <inertial pos="0 -0.027 0.371" mass="20" diaginertia="0.692 0.688 0.153"/>
+        <geom type="mesh" mesh="body_base_link" rgba="0.2 0.2 0.25 1" class="body_visual"/>
+        <!-- 躯干碰撞 -->
+        <geom name="col_torso" type="capsule" fromto="0 -0.04 -0.05 0 -0.04 0.85" size="0.10" class="col_body"/>
+
+        <!-- ===== 平台（腰部上下已固定） ===== -->
+        <body name="platform_base_link" pos="0 -0.11663 1.271">
+          <inertial pos="0 -0.053 0.001" mass="5" diaginertia="0.013 0.032 0.022"/>
+          <geom type="mesh" mesh="platform_base_link" rgba="0.25 0.25 0.3 1" class="body_visual"/>
+          <!-- 平台碰撞 -->
+          <geom name="col_platform" type="capsule" fromto="0 0 -0.08 0 0 0.08" size="0.08" class="col_body"/>
+
+          <!-- ===== 头部 ===== -->
+          <body name="head_link1" pos="0 -0.102 0.126">
+            <geom type="mesh" mesh="head_link1" rgba="0.3 0.3 0.35 1" class="body_visual"/>
+            <geom name="col_head1" type="capsule" fromto="0 0 -0.03 0 0 0.03" size="0.025" class="col_body"/>
+            <body name="head_link2" pos="0 -0.02 0.044">
+              <geom type="mesh" mesh="head_link2" rgba="0.3 0.3 0.35 1" class="body_visual"/>
+              <geom name="col_head2" type="capsule" fromto="0 0 -0.05 0 0 0.05" size="0.05" class="col_body"/>
+              <body name="camera_link" pos="-0.003 -0.052 0.062">
+                <geom type="mesh" mesh="camera_link" rgba="0.2 0.2 0.25 1" class="body_visual"/>
+                <geom name="col_camera" type="capsule" fromto="0 0 -0.03 0 0 0.03" size="0.02" class="col_body"/>
+              </body>
+            </body>
+          </body>
+
+          <!-- ============================================================ -->
+          <!-- ===== 右臂（6-DOF 驱动 + 网球拍） ===== -->
+          <!-- ============================================================ -->
+          <body name="r_base_link1" pos="-0.1 -0.1103 0.031645" quat="0.92388 0 -0.382683 0">
+            <inertial pos="0 0.006 0.025" mass="0.234" diaginertia="0.000274 0.000264 0.000367"/>
+            <geom type="mesh" mesh="r_base_link1" rgba="0.85 0.85 0.88 1" class="arm_visual"/>
+            <geom name="col_r_base" type="capsule" fromto="0 0 -0.07 0 0 0.07" size="0.05" class="col_body"/>
+
+            <!-- r_joint1: 肩关节偏航 -->
+            <body name="r_link1" pos="0 0 0.187">
+              <joint name="r_joint1" type="hinge" axis="0 0 1" range="-178 178" damping="2.0" armature="0.2"/>
+              <inertial pos="0 0.021 -0.025" mass="0.594" diaginertia="0.00127 0.00118 0.000561"/>
+              <geom type="mesh" mesh="r_link1" rgba="0.2 0.6 0.85 1" class="arm_visual"/>
+              <geom name="col_r_link1" type="capsule" fromto="0 0 -0.06 0 0 0.06" size="0.04" class="col_arm"/>
+
+              <!-- r_joint2: 肩关节俯仰 -->
+              <body name="r_link2" quat="0.5 -0.5 0.5 0.5">
+                <joint name="r_joint2" type="hinge" axis="0 0 1" range="-130 130" damping="2.0" armature="0.2"/>
+                <inertial pos="0.152 0 -0.006" mass="0.864" diaginertia="0.000633 0.00205 0.00195"/>
+                <geom type="mesh" mesh="r_link2" rgba="0.2 0.6 0.85 1" class="arm_visual"/>
+                <geom name="col_r_link2" type="capsule" fromto="0 0 -0.14 0 0 0.14" size="0.04" class="col_arm"/>
+
+                <!-- r_joint3: 肘关节 -->
+                <body name="r_link3" pos="0.256 0 0" quat="0.707107 0 0 0.707107">
+                  <joint name="r_joint3" type="hinge" axis="0 0 1" range="-135 135" damping="1.0" armature="0.1"/>
+                  <inertial pos="0 -0.060 0.010" mass="0.290" diaginertia="0.000637 0.000156 0.000614"/>
+                  <geom type="mesh" mesh="r_link3" rgba="0.2 0.6 0.85 1" class="arm_visual"/>
+                  <geom name="col_r_link3" type="capsule" fromto="0 0 -0.07 0 0 0.07" size="0.03" class="col_arm"/>
+
+                  <!-- r_joint4: 腕关节1 -->
+                  <body name="r_link4" pos="0 -0.21 0" quat="0.707107 0.707107 0 0">
+                    <joint name="r_joint4" type="hinge" axis="0 0 1" range="-178 178" damping="0.5" armature="0.05"/>
+                    <inertial pos="0 -0.018 -0.022" mass="0.239" diaginertia="0.000286 0.000263 0.000120"/>
+                    <geom type="mesh" mesh="r_link4" rgba="0.2 0.6 0.85 1" class="arm_visual"/>
+                    <geom name="col_r_link4" type="capsule" fromto="0 0 -0.04 0 0 0.04" size="0.03" class="col_arm"/>
+
+                    <!-- r_joint5: 腕关节2 -->
+                    <body name="r_link5" quat="0.707107 -0.707107 0 0">
+                      <joint name="r_joint5" type="hinge" axis="0 0 1" range="-128 128" damping="0.3" armature="0.03"/>
+                      <inertial pos="0 -0.059 0.007" mass="0.219" diaginertia="0.000351 0.000105 0.000334"/>
+                      <geom type="mesh" mesh="r_link5" rgba="0.2 0.6 0.85 1" class="arm_visual"/>
+                      <geom name="col_r_link5" type="capsule" fromto="0 0 -0.05 0 0 0.05" size="0.025" class="col_arm"/>
+
+                      <!-- r_joint6: 腕关节3（法兰旋转） -->
+                      <body name="r_link6" pos="0 -0.112 0" quat="0.707107 0.707107 0 0">
+                        <joint name="r_joint6" type="hinge" axis="0 0 1" range="-360 360" damping="0.2" armature="0.02"/>
+                        <inertial pos="-0.029 0 0.028" mass="0.221" diaginertia="0.000138 0.000269 0.000353"/>
+                        <geom type="mesh" mesh="r_link6" rgba="0.2 0.6 0.85 1" class="arm_visual"/>
+                        <geom name="col_r_link6" type="capsule" fromto="0 0 -0.02 0 0 0.04" size="0.025" class="col_arm"/>
+
+                        <!-- ===== 法兰 ===== -->
+                        <body name="r_flange" pos="0 0 0.0445">
+                          <geom type="cylinder" size="0.03 0.005" rgba="0.3 0.3 0.35 1" class="arm_visual"/>
+
+                          <!-- ===== 网球拍 ===== -->
+                          <!-- 手柄从法兰中心沿Z轴引出，拍面与法兰呈90°（面法线沿X） -->
+                          <!-- 绕法兰Z轴旋转90°，使拍面法线从X转到Y方向 -->
+                          <body name="r_racket_body" pos="0 0 0" quat="0.707107 0 0 0.707107">
+                            <inertial pos="0 0 0.13" mass="0.35" diaginertia="0.003 0.001 0.003"/>
+                            <geom name="r_racket_handle" type="capsule" fromto="0 0 0.03 0 0 0.22" size="0.012" rgba="0.5 0.3 0.1 1" class="racket"/>
+                            <geom name="r_racket_face" type="ellipsoid" pos="0 0 0.25" size="0.025 0.10 0.12" rgba="0.2 0.7 0.2 0.6" class="racket"/>
+                            <site name="racket_center" pos="0 0 0.25" size="0.01" rgba="1 0 0 1"/>
+                          </body>
+                        </body>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+
+          <!-- ============================================================ -->
+          <!-- ===== 左臂（不驱动，仅视觉） ===== -->
+          <!-- ============================================================ -->
+          <body name="l_base_link1" pos="0.1 -0.1103 0.031645" quat="0 0.382683 0 0.92388">
+            <inertial pos="0 0.006 0.025" mass="0.234" diaginertia="0.000274 0.000264 0.000367"/>
+            <geom type="mesh" mesh="l_base_link1" rgba="0.85 0.85 0.88 1" class="arm_visual"/>
+            <geom name="col_l_base" type="capsule" fromto="0 0 -0.07 0 0 0.07" size="0.05" class="col_body"/>
+
+            <body name="l_link1" pos="0 0 0.187" quat="0 0 0 1">
+              <joint name="l_joint1" type="hinge" axis="0 0 1" range="-178 178" damping="2.0" armature="0.2"/>
+              <inertial pos="0 0.021 -0.025" mass="0.594" diaginertia="0.00127 0.00118 0.000561"/>
+              <geom type="mesh" mesh="l_link1" rgba="0.6 0.6 0.65 1" class="arm_visual"/>
+              <geom name="col_l_link1" type="capsule" fromto="0 0 -0.06 0 0 0.06" size="0.04" class="col_arm"/>
+
+              <body name="l_link2" quat="0.5 -0.5 0.5 0.5">
+                <joint name="l_joint2" type="hinge" axis="0 0 1" range="-130 130" damping="2.0" armature="0.2"/>
+                <inertial pos="0.152 0 -0.006" mass="0.864" diaginertia="0.000633 0.00205 0.00195"/>
+                <geom type="mesh" mesh="l_link2" rgba="0.6 0.6 0.65 1" class="arm_visual"/>
+                <geom name="col_l_link2" type="capsule" fromto="0 0 -0.14 0 0 0.14" size="0.04" class="col_arm"/>
+
+                <body name="l_link3" pos="0.256 0 0" quat="0.707107 0 0 0.707107">
+                  <joint name="l_joint3" type="hinge" axis="0 0 1" range="-135 135" damping="1.0" armature="0.1"/>
+                  <inertial pos="0 -0.060 0.010" mass="0.290" diaginertia="0.000637 0.000156 0.000614"/>
+                  <geom type="mesh" mesh="l_link3" rgba="0.6 0.6 0.65 1" class="arm_visual"/>
+                  <geom name="col_l_link3" type="capsule" fromto="0 0 -0.07 0 0 0.07" size="0.03" class="col_arm"/>
+
+                  <body name="l_link4" pos="0 -0.21 0" quat="0.707107 0.707107 0 0">
+                    <joint name="l_joint4" type="hinge" axis="0 0 1" range="-178 178" damping="0.5" armature="0.05"/>
+                    <inertial pos="0 -0.018 -0.022" mass="0.239" diaginertia="0.000286 0.000263 0.000120"/>
+                    <geom type="mesh" mesh="l_link4" rgba="0.6 0.6 0.65 1" class="arm_visual"/>
+                    <geom name="col_l_link4" type="capsule" fromto="0 0 -0.04 0 0 0.04" size="0.03" class="col_arm"/>
+
+                    <body name="l_link5" quat="0.707107 -0.707107 0 0">
+                      <joint name="l_joint5" type="hinge" axis="0 0 1" range="-128 128" damping="0.3" armature="0.03"/>
+                      <inertial pos="0 -0.059 0.007" mass="0.219" diaginertia="0.000351 0.000105 0.000334"/>
+                      <geom type="mesh" mesh="l_link5" rgba="0.6 0.6 0.65 1" class="arm_visual"/>
+                      <geom name="col_l_link5" type="capsule" fromto="0 0 -0.05 0 0 0.05" size="0.025" class="col_arm"/>
+
+                      <body name="l_link6" pos="0 -0.115 0" quat="0.707107 0.707107 0 0">
+                        <joint name="l_joint6" type="hinge" axis="0 0 1" range="-360 360" damping="0.2" armature="0.02"/>
+                        <inertial pos="0.029 0 0.025" mass="0.221" diaginertia="0.000138 0.000269 0.000353"/>
+                        <geom type="mesh" mesh="l_link6" rgba="0.6 0.6 0.65 1" class="arm_visual"/>
+                        <geom name="col_l_link6" type="capsule" fromto="0 0 -0.02 0 0 0.04" size="0.025" class="col_arm"/>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+
+        </body>
+      </body>
+    </body>
+
+    <!-- ===== 网球 ===== -->
+    <body name="ball" pos="5 0 2">
+      <freejoint name="ball_freejoint"/>
+      <geom name="ball" type="sphere" size="0.033" rgba="0.95 0.95 0.1 1" mass="0.058" class="ball"/>
+    </body>
+
+    <!-- 击打目标点标记 -->
+    <site name="hit_target" pos="0 0 1.3" size="0.03" rgba="1 0 0 0.5"/>
+  </worldbody>
+
+  <actuator>
+    <!-- 右臂 6 个力矩执行器 -->
+    <motor name="torque_r_joint1" joint="r_joint1" ctrlrange="-60 60"/>
+    <motor name="torque_r_joint2" joint="r_joint2" ctrlrange="-60 60"/>
+    <motor name="torque_r_joint3" joint="r_joint3" ctrlrange="-30 30"/>
+    <motor name="torque_r_joint4" joint="r_joint4" ctrlrange="-10 10"/>
+    <motor name="torque_r_joint5" joint="r_joint5" ctrlrange="-10 10"/>
+    <motor name="torque_r_joint6" joint="r_joint6" ctrlrange="-10 10"/>
+    <!-- 左臂 6 个力矩执行器（用于 PD 保持零位） -->
+    <motor name="torque_l_joint1" joint="l_joint1" ctrlrange="-60 60"/>
+    <motor name="torque_l_joint2" joint="l_joint2" ctrlrange="-60 60"/>
+    <motor name="torque_l_joint3" joint="l_joint3" ctrlrange="-30 30"/>
+    <motor name="torque_l_joint4" joint="l_joint4" ctrlrange="-10 10"/>
+    <motor name="torque_l_joint5" joint="l_joint5" ctrlrange="-10 10"/>
+    <motor name="torque_l_joint6" joint="l_joint6" ctrlrange="-10 10"/>
+  </actuator>
+</mujoco>

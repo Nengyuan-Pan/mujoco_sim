@@ -1,0 +1,65 @@
+# 仿真参数
+sim:
+  dt: 0.005              # 仿真时间步长（秒），必须与MuJoCo模型timestep一致
+
+# iLQT 参数
+ilqt:
+  max_iter: 300           # 最大迭代次数
+  tol: 1.0e-4             # 收敛阈值
+  horizon: 80             # 规划时间步数 N (80*0.005=0.4s)
+  mu_min: 1.0e-6
+  mu_max: 1.0e10
+  mu_init: 0.01
+  delta_0: 1.6
+  alpha_list:
+    - 1.0
+    - 0.5
+    - 0.25
+    - 0.1
+    - 0.05
+    - 0.01
+  lin_eps: 1.0e-6
+
+# 代价权重
+cost:
+  Q_p: [50000.0, 50000.0, 50000.0]
+  Q_v: [200.0, 200.0, 200.0]
+  R: 0.0001
+
+# 初始关节角度（弧度）— UR5e 准备姿势（臂前伸，球拍在前方）
+init_q: [0.0, -1.2, 1.8, -0.6, 0.0, 0.0]
+
+# 初始控制猜测（仅作后备，实际使用雅可比转置初始控制）
+init_u: [0.0, -20.0, 20.0, -5.0, 0.0, 0.0]
+
+# 网球参数
+ball:
+  gravity: [0.0, 0.0, -9.81]
+  radius: 0.033
+  mass: 0.058
+  # 发球与弹跳参数
+  serve_distance: 22.0          # 发球 X 距离 (m)
+  serve_height: [2.5, 3.0]     # 发球高度范围 (m)
+  bounce_restitution: 0.75     # 弹跳恢复系数
+  target_speed: 5.0           # 到达工作区目标速度 (m/s)
+  target_speed_range: [15, 25] # 到达速度范围
+  flight_time: 1.0             # 总飞行时间约 (s)
+
+# 击打参数
+hitting:
+  racket_speed: 5.0
+  hit_direction: [0.0, -1.0, 0.3]
+  workspace_radius: 0.85
+  shoulder_pos: [0.0, -0.12, 1.163]
+  hit_offset_x_range: [0.10, 0.40]
+  hit_offset_y_range: [-0.25, 0.25]
+  hit_offset_z_range: [-0.15, 0.30]
+
+# 可视化参数
+viewer:
+  camera_distance: 2.5
+  camera_elevation: -20
+  camera_azimuth: 135
+  camera_lookat: [0.0, 0.0, 1.0]
+  playback_speed: 1.0
+  loop: true

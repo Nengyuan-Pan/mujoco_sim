@@ -1,0 +1,127 @@
+<mujoco model="ur5e_tennis_robot">
+  <!--
+    UR5e 运动学参数来源：mujoco_menagerie (BSD-3-Clause)
+    原始来源：Universal Robots 官方 URDF
+    关节名与 body 名保持与 menagerie ur5e.xml 一致（带 _joint 后缀）
+    执行器改为 motor 类型（力矩控制），适配 iLQR/MPC
+  -->
+  <option gravity="0 0 -9.81" timestep="0.005" integrator="implicitfast"/>
+
+  <default>
+    <default class="ur5e">
+      <material specular="0.5" shininess="0.25"/>
+    </default>
+    <!-- 桩柱：仅视觉，不参与碰撞 -->
+    <default class="pole">
+      <geom contype="0" conaffinity="0"/>
+    </default>
+    <!-- 手臂连杆：不参与碰撞（自碰撞由关节限位和规划保证） -->
+    <default class="arm">
+      <geom contype="0" conaffinity="0"/>
+    </default>
+    <!-- 球拍：与球碰撞（contype=4, conaffinity=8） -->
+    <default class="racket">
+      <geom contype="4" conaffinity="8"/>
+    </default>
+    <!-- 球：与球拍碰撞（contype=8, conaffinity=4），弹跳由解析模型处理 -->
+    <default class="ball">
+      <geom contype="8" conaffinity="4"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <light pos="0 0 3" dir="0 0 -1" diffuse="0.9 0.9 0.9"/>
+
+    <!-- 地面 -->
+    <geom type="plane" size="25 25 0.1" rgba="0.3 0.35 0.3 1"/>
+
+    <!-- 安装桩（替代人形躯干），高 1.0m，半径 0.06m -->
+    <body name="pole" pos="0 0 0.5">
+      <geom type="cylinder" size="0.06 0.5" rgba="0.5 0.5 0.5 1" mass="30" class="pole"/>
+
+      <!-- UR5e 底座 — 安装在桩顶右侧（-Y 方向）
+           Y=-0.12：桩柱半径0.06 + 底座半径0.06 = 紧贴外表面
+           Z=0.5：升到桩顶
+      -->
+      <body name="base_link" pos="0 -0.12 0.5">
+        <inertial pos="0 0 0" mass="4.0" diaginertia="0.00443 0.00443 0.0072"/>
+        <geom type="cylinder" size="0.06 0.04" rgba="0.3 0.3 0.35 1" class="arm"/>
+
+        <!-- shoulder_pan_joint — 关节 0，绕 Z 旋转 -->
+        <body name="shoulder_link" pos="0 0 0.163">
+          <joint name="shoulder_pan_joint" type="hinge" axis="0 0 1" range="-360 360" damping="1.0" armature="0.1"/>
+          <inertial pos="0 -0.00193 -0.02561" mass="3.761" diaginertia="0.01027 0.01027 0.00666"/>
+          <geom type="cylinder" size="0.06 0.06" rgba="0.45 0.45 0.5 1" class="arm"/>
+
+          <!-- shoulder_lift_joint — 关节 1，绕 Y 旋转 -->
+          <body name="upper_arm_link" pos="0 0.138 0" quat="0.707107 0 0.707107 0">
+            <joint name="shoulder_lift_joint" type="hinge" axis="0 1 0" range="-360 360" damping="1.0" armature="0.1"/>
+            <inertial pos="-0.2125 0 0.11336" mass="8.058" diaginertia="0.13389 0.13389 0.01511"/>
+            <geom type="capsule" fromto="0 0 0 0 0 0.425" size="0.04" rgba="0.45 0.45 0.5 1" class="arm"/>
+
+            <!-- elbow_joint — 关节 2，绕 Y 旋转 -->
+            <body name="forearm_link" pos="0 -0.131 0.425">
+              <joint name="elbow_joint" type="hinge" axis="0 1 0" range="-180 180" damping="0.5" armature="0.1"/>
+              <inertial pos="-0.2422 0 0.0265" mass="2.846" diaginertia="0.03118 0.03118 0.00410"/>
+              <geom type="capsule" fromto="0 0 0 0 0 0.3922" size="0.035" rgba="0.45 0.45 0.5 1" class="arm"/>
+
+              <!-- wrist_1_joint — 关节 3，绕 Y 旋转 -->
+              <body name="wrist_1_link" pos="0 0 0.3922" quat="0.707107 0 0.707107 0">
+                <joint name="wrist_1_joint" type="hinge" axis="0 1 0" range="-180 180" damping="0.2" armature="0.05"/>
+                <inertial pos="0 -0.01634 -0.0018" mass="1.37" diaginertia="0.00256 0.00256 0.00219"/>
+                <geom type="cylinder" size="0.03 0.035" rgba="0.45 0.45 0.5 1" class="arm"/>
+
+                <!-- wrist_2_joint — 关节 4，绕 Z 旋转 -->
+                <body name="wrist_2_link" pos="0 0.1333 0">
+                  <joint name="wrist_2_joint" type="hinge" axis="0 0 1" range="-180 180" damping="0.1" armature="0.05"/>
+                  <inertial pos="0 0.01634 -0.0018" mass="1.3" diaginertia="0.00256 0.00256 0.00219"/>
+                  <geom type="cylinder" size="0.025 0.03" rgba="0.45 0.45 0.5 1" class="arm"/>
+
+                  <!-- wrist_3_joint — 关节 5，绕 Y 旋转 -->
+                  <body name="wrist_3_link" pos="0 0 0.0997">
+                    <joint name="wrist_3_joint" type="hinge" axis="0 1 0" range="-180 180" damping="0.05" armature="0.01"/>
+                    <inertial pos="0 0 -0.001159" mass="0.365" diaginertia="0.000132 9.909e-05 9.909e-05"/>
+                    <geom type="cylinder" size="0.025 0.02" rgba="0.45 0.45 0.5 1" class="arm"/>
+
+                    <!-- 法兰 — 标准距 wrist_3 为 0.0996m -->
+                    <body name="flange" pos="0 0 0.0996">
+                      <geom type="cylinder" size="0.03 0.005" rgba="0.3 0.3 0.35 1" class="arm"/>
+
+                      <!-- 球拍手柄 — 沿法兰局部 Y 方向延伸 -->
+                      <body name="racket_body" pos="0 0.10 0">
+                        <inertial pos="0 0.10 0" mass="0.35" diaginertia="0.003 0.001 0.003"/>
+                        <geom name="racket_handle" type="capsule" fromto="0 -0.10 0 0 0.10 0" size="0.012" rgba="0.5 0.3 0.1 1" class="racket"/>
+
+                        <!-- 球拍面 — 拍面法线朝 -X（朝来球方向），与球可碰撞 -->
+                        <geom name="racket_face" type="ellipsoid" pos="0 0.12 0" size="0.005 0.10 0.12" rgba="0.2 0.7 0.2 0.6" class="racket"/>
+                        <site name="racket_center" pos="0 0.12 0" size="0.01" rgba="1 0 0 1"/>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+
+    <!-- 网球：弹跳由解析模型处理，球-球拍碰撞保留 -->
+    <body name="ball" pos="5 0 2">
+      <freejoint name="ball_freejoint"/>
+      <geom type="sphere" size="0.033" rgba="0.95 0.95 0.1 1" mass="0.058" class="ball"/>
+    </body>
+
+    <!-- 击打目标点标记 -->
+    <site name="hit_target" pos="0 0 1" size="0.03" rgba="1 0 0 0.5"/>
+  </worldbody>
+
+  <actuator>
+    <motor name="torque_shoulder_pan"   joint="shoulder_pan_joint"   ctrlrange="-150 150"/>
+    <motor name="torque_shoulder_lift"  joint="shoulder_lift_joint"  ctrlrange="-150 150"/>
+    <motor name="torque_elbow"          joint="elbow_joint"          ctrlrange="-150 150"/>
+    <motor name="torque_wrist_1"        joint="wrist_1_joint"        ctrlrange="-28 28"/>
+    <motor name="torque_wrist_2"        joint="wrist_2_joint"        ctrlrange="-28 28"/>
+    <motor name="torque_wrist_3"        joint="wrist_3_joint"        ctrlrange="-28 28"/>
+  </actuator>
+</mujoco>
