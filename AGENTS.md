@@ -83,7 +83,8 @@ mujoco_sim/
 │
 ├── configs/
 │   ├── default.yaml                   # 默认超参数（仿真、iLQT、代价、球、击打）
-│   └── mpc.yaml                       # MPC 专用参数（horizon、分层策略、退火、发球）
+│   ├── mpc.yaml                       # MPC 专用参数 + cost_type 切换
+│   └── cost_hitting.yaml              # HittingCost 代价权重（终端/控制/运行/关节跟踪）
 │
 ├── src/
 │   ├── __init__.py
@@ -99,8 +100,12 @@ mujoco_sim/
 │   ├── ilqt/                          # iLQR/iLQT 求解器核心
 │   │   ├── __init__.py
 │   │   ├── solver.py                  # ILQTSolver（后向递推 + solve_few_iters）
-│   │   ├── cost.py                    # HittingCost（终端位置+速度+法向量+运行代价）
-│   │   └── utils.py                   # 前向传递 + 线搜索 + 正则化
+│   │   ├── utils.py                   # 前向传递 + 线搜索 + 正则化
+│   │   ├── cost.py                    # 向后兼容 shim，重导出 HittingCost
+│   │   └── costs/                     # ★ 代价函数子包（插件化架构）
+│   │       ├── __init__.py            # COST_REGISTRY 注册表 + create_cost 工厂
+│   │       ├── base.py                # BaseCost(ABC) + EndEffectorCost
+│   │       └── hitting.py             # HittingCost 具体实现
 │   ├── tennis/                        # 网球场景相关
 │   │   ├── __init__.py
 │   │   ├── ball.py                    # 抛物线轨迹 + 弹跳模型 + 发球生成
@@ -158,6 +163,17 @@ mujoco_sim/
 - **正则化**: Levenberg-Marquardt 风格（mu_min, mu_max, delta_0）
 - **两种线性化**: 解析法（`linearize_analytical`，推荐）和有限差分法（`linearize_dynamics`，备用）
 - **短地平线模式**: `solve_few_iters()` 专为 MPC 设计，只迭代 2~3 次
+
+### 代价函数插件架构
+
+代价函数通过 `COST_REGISTRY` 注册表 + `create_cost` 工厂实现可插拔切换。
+`mpc.yaml` 中 `cost_type` 字段指定使用哪个代价类型，对应 `configs/cost_*.yaml` 配置文件。
+
+基类层次：
+- **`BaseCost`** — 抽象根类，定义 4 个核心方法（`running_cost`, `terminal_cost`, `running_derivatives`, `terminal_derivatives`）和 4 个 no-op mutation 方法（`update_weights`, `update_target`, `set_R_schedule`, `set_q_des_traj`）。
+- **`EndEffectorCost`** — 中间基类，持有 env + 维度常量，提供 `_compute_h` / `_compute_n` / `_compute_jacobian_h` / `_compute_jacobian_n` 工具方法。末端执行器相关的代价函数继承此类。
+
+新增代价类型只需：新建 `costs/xxx.py`（继承 `BaseCost` 或 `EndEffectorCost`） + 新建 `configs/cost_xxx.yaml` + 在 `COST_REGISTRY` 加一行。
 
 ### 代价函数（`HittingCost`）
 ```

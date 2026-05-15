@@ -92,7 +92,8 @@ mujoco_sim/
 │
 ├── configs/
 │   ├── default.yaml                   # 仿真参数、代价权重、网球参数、初始位姿
-│   └── mpc.yaml                       # MPC 专用参数（horizon、replan_interval、退火等）
+│   ├── mpc.yaml                       # MPC 专用参数 + cost_type 切换
+│   └── cost_hitting.yaml              # HittingCost 代价权重
 │
 ├── scripts/
 │   ├── rm65_mpc_ilqr_5_5.py           # ★ 主脚本：MPC+iLQR 击打（后摆+退火+法向量）
@@ -115,8 +116,12 @@ mujoco_sim/
 │   │   └── viewer.py                  # 可视化工具（离线回放 + matplotlib 绘图）
 │   ├── ilqt/
 │   │   ├── solver.py                  # ILQTSolver（后向递推 + solve_few_iters）
-│   │   ├── cost.py                    # HittingCost（终端位置+速度+法向量+运行代价）
-│   │   └── utils.py                   # 前向传递 + 线搜索
+│   │   ├── utils.py                   # 前向传递 + 线搜索
+│   │   ├── cost.py                    # 向后兼容 shim，重导出 HittingCost
+│   │   └── costs/                     # ★ 代价函数子包（插件化架构）
+│   │       ├── __init__.py            # COST_REGISTRY + create_cost 工厂
+│   │       ├── base.py                # BaseCost(ABC) + EndEffectorCost
+│   │       └── hitting.py             # HittingCost（终端位置+速度+法向量+运行代价）
 │   ├── dynamics/
 │   │   ├── linearize.py               # 解析/有限差分动力学线性化（A, B 矩阵）
 │   │   └── simulate.py                # 前向仿真 / rollout
@@ -163,6 +168,11 @@ mujoco_sim/
 
 ### 代价函数
 
+代价函数采用插件化架构（`src/ilqt/costs/`），通过 `COST_REGISTRY` 注册表 + `mpc.yaml` 中 `cost_type` 字段切换。
+新增代价类型只需：新建 `costs/xxx.py` + 新建 `configs/cost_xxx.yaml` + 注册表加一行。
+
+当前默认使用 HittingCost：
+
 ```
 终端代价:
   J_hit = w_p·||p_ee − p_hit||² + w_v·||v_ee − v_des||² + w_n·||n − n_des||²
@@ -208,6 +218,7 @@ hitting:
 
 ```yaml
 mpc:
+  cost_type: hitting             # 代价函数类型（对应 configs/cost_*.yaml）
   total_horizon: 200           # 总仿真步数
   fixed_horizon: 20            # 短地平线步数
   replan_interval: 15          # 重规划间隔
@@ -215,4 +226,22 @@ mpc:
   use_analytical: true         # 使用解析线性化
   use_bounce: true             # 启用弹跳模型
   bounce_restitution: 0.75     # 弹跳恢复系数
+```
+
+### `configs/cost_hitting.yaml` — HittingCost 代价权重
+
+```yaml
+terminal:
+  Q_p: [50000.0, 50000.0, 50000.0]   # 终端位置代价权重
+  Q_v: [200.0, 200.0, 200.0]         # 终端速度代价权重
+  Q_n: 500000.0                       # 拍面法向量代价权重 (0=禁用)
+
+control:
+  R: 0.0001                           # 基础控制代价权重
+
+running:
+  Q_p_ratio: 0.0                      # 运行位置代价比例
+
+joint_tracking:
+  Q_joint: {0: 500.0}                 # 关节跟踪权重
 ```
