@@ -868,7 +868,7 @@ def main() -> None:
     parser.add_argument("--no-backswing", action="store_true", help="禁用后摆（退化为普通 MPC）")
     parser.add_argument("--r-decay", type=float, default=0.30, help="R 衰减占比 (0~1, 默认0.30即后30%衰减)")
     parser.add_argument("--no-r-decay", action="store_true", help="禁用 R 退火（全程常数 R）")
-    parser.add_argument("--hit-shift", type=float, default=0.05, help="击打目标沿挥拍方向前移距离 (m)，0=不偏移，默认0.05")
+    parser.add_argument("--hit-shift", type=float, default=0.01, help="击打目标沿挥拍方向前移距离 (m)，0=不偏移，默认0.01")
     parser.add_argument("--ball-speed", type=float, default=None, help="球到达击打点时的速度 (m/s)，不指定则随机")
     parser.add_argument("--normal-weight", type=float, default=500000.0, help="拍面法向量代价权重 (0=禁用，默认500000)")
     parser.add_argument("--normal-flip", action="store_true", help="翻转法向量方向（当拍面朝向反了时使用）")
@@ -898,10 +898,10 @@ def main() -> None:
     total_horizon = 200
     fixed_horizon = 30
     replan_interval = 10
-    max_iter_per_plan = 5
+    max_iter_per_plan = 8
     Q_p_scale_far = 5.0
     Q_v_scale_far = 3.0
-    Q_p_scale_near = 1.0
+    Q_p_scale_near = 5.0
     Q_v_scale_near = 50.0
 
     if args.horizon is not None:
@@ -950,9 +950,9 @@ def main() -> None:
 
     # target_center = np.array([-0.82765693, -0.47411682, 0.86947444])
     target_center = np.array([-0.82765693, -0.47411682, 0.86947444])
-    target_offset = 0.1
+    target_offset = 0.2
 
-    hit_time = total_horizon * dt * rng.uniform(0.4, 0.6)
+    hit_time = total_horizon * dt * rng.uniform(0.3, 0.4)
     p0, v0, p_hit_expected = generate_ball_to_target_box(
         target_center, target_offset, hit_time, g,
         shoulder_pos=shoulder_pos, workspace_radius=workspace_radius,
@@ -1193,10 +1193,10 @@ def main() -> None:
                 iters_plan = max_iter_per_plan
                 skip_ls = False
                 if is_first_plan:
-                    iters_plan = 30
+                    iters_plan = 50
                     is_first_plan = False
                 elif k_hit_new <= near_threshold:
-                    iters_plan = 10
+                    iters_plan = 15
 
                 if use_backswing:
                     q_hit_new_ik = env.solve_ik(
@@ -1304,6 +1304,8 @@ def main() -> None:
         enable_collision = (k_hit_new <= 10)
         if hasattr(env, "set_arm_collision"):
             env.set_arm_collision(enable_collision)
+        # 保存碰撞前球速，用于弹性反弹计算
+        ball_vel_before_step = ball_vel.copy() if enable_collision else ball_vel
         x_current, ball_pos, ball_vel = env.step_full(u_cmd)
 
         # 碰撞诊断：检查球-球拍接触
@@ -1350,26 +1352,18 @@ def main() -> None:
             env.update_kinematics()
             p_ee_at_hit = env.get_ee_pos().copy()
 
-            # 解析弹性碰撞：手动计算反弹速度并设置球速
-            # 球拍面法向量（世界坐标）
+            # 解析弹性碰撞：用碰撞前的球速计算正确反弹
+            # MuJoCo 碰撞响应偏弱，用手动计算覆盖
             n_racket = env.get_ee_normal()
             n_hat = n_racket / (np.linalg.norm(n_racket) + 1e-8)
             v_ee = env.get_ee_vel()
-            v_ball_now = ball_vel.copy()
-            # 沿法向的相对速度
-            v_rel_n = np.dot(v_ball_now - v_ee, n_hat)
-            if v_rel_n > 0:
-                # 球正在远离球拍，不需要反弹
-                logger.info(f"  球正在远离球拍 (v_rel_n={v_rel_n:.2f})，跳过反弹")
-            else:
-                # 弹性碰撞：恢复系数 e=0.8（网球拍弦+球）
-                # 球拍质量远大于球质量（0.35kg vs 0.058kg），近似为无限大质量
-                e = 0.8
-                v_ball_new = v_ball_now - (1 + e) * v_rel_n * n_hat
-                logger.info(f"  弹性反弹: v_ball_before={v_ball_now}, v_ball_after={v_ball_new}")
-                logger.info(f"  球速: {np.linalg.norm(v_ball_now):.2f}->{np.linalg.norm(v_ball_new):.2f} m/s")
-                # 设置球的新速度
-                env.set_ball_vel(v_ball_new)
+            v_ball_pre = ball_vel_before_step
+            v_rel_n = np.dot(v_ball_pre - v_ee, n_hat)
+            e = 0.8
+            v_ball_new = v_ball_pre - (1 + e) * v_rel_n * n_hat
+            logger.info(f"  弹性反弹: v_ball_before={v_ball_pre}, v_ball_after={v_ball_new}")
+            logger.info(f"  球速: {np.linalg.norm(v_ball_pre):.2f}->{np.linalg.norm(v_ball_new):.2f} m/s, v_rel_n={v_rel_n:.2f}")
+            env.set_ball_vel(v_ball_new)
 
         # 碰撞后继续几步再停止，让碰撞响应完成
         if ball_was_hit and (step - hit_step) >= 5:
@@ -1502,15 +1496,36 @@ def main() -> None:
         # 重新仿真获取完整轨迹（包含碰撞效果）
         X_replay = [env.get_arm_state().copy()]
         ball_replay = [env.get_ball_pos().copy()]
+        rebound_applied = False
 
         for i, u_cmd in enumerate(U_arr):
             # 只在击打前 2 步到击打后 2 步开启碰撞，其余步关闭
             # 避免球在接近过程中被球拍提前碰飞
-            enable_collision = (hit_step >= 0 and abs(i - hit_step) <= 2)
+            enable_collision = (hit_step >= 0 and abs(i - hit_step) <= 5)
             if hasattr(env, "set_arm_collision"):
                 env.set_arm_collision(enable_collision)
+            # 保存碰撞前球速
+            ball_vel_pre = env.get_ball_vel().copy() if enable_collision else np.zeros(3)
             env.step(u_cmd)
             env._handle_ball_bounce()
+            # 碰撞检测 + 手动弹性反弹
+            if enable_collision and not rebound_applied and hit_step >= 0:
+                ncon = env.data.ncon
+                for ci in range(ncon):
+                    c = env.data.contact[ci]
+                    g1 = env.model.geom(c.geom1).name
+                    g2 = env.model.geom(c.geom2).name
+                    if ('ball' in g1 or 'ball' in g2) and ('racket' in g1 or 'racket' in g2):
+                        n_racket = env.get_ee_normal()
+                        n_hat = n_racket / (np.linalg.norm(n_racket) + 1e-8)
+                        v_ee = env.get_ee_vel()
+                        v_rel_n = np.dot(ball_vel_pre - v_ee, n_hat)
+                        e = 0.8
+                        v_ball_new = ball_vel_pre - (1 + e) * v_rel_n * n_hat
+                        env.set_ball_vel(v_ball_new)
+                        rebound_applied = True
+                        logger.info(f"  回放弹性反弹: 球速 {np.linalg.norm(ball_vel_pre):.2f}->{np.linalg.norm(v_ball_new):.2f} m/s")
+                        break
             X_replay.append(env.get_arm_state().copy())
             ball_replay.append(env.get_ball_pos().copy())
 

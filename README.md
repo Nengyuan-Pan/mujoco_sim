@@ -1,17 +1,22 @@
 # RM-65 网球机器人 — MPC+iLQR 击打仿真
 
-RM-65 双臂机器人网球击打 MuJoCo 仿真项目。使用 **MPC（模型预测控制）** 作为外层闭环框架，**iLQR（迭代线性二次调节器）** 作为内层轨迹优化求解器。包含后摆 Warm-start、R 退火调度、拍面法向量约束等优化策略。
+RM-65 双臂机器人网球击打 MuJoCo 仿真项目。使用 **MPC（模型预测控制）** 作为外层闭环框架，**iLQR（迭代线性二次调节器）** 作为内层轨迹优化求解器。包含后摆 Warm-start、R 退火调度、拍面法向量约束等优化策略。球和机械臂均由 MuJoCo 物理引擎驱动，球拍-球碰撞产生真实击打效果。
 
 ---
 
 ## 环境安装
 
 ```bash
-# 安装 Python 依赖
+# 创建 conda 环境（推荐）
+conda create -n mujoco_tennis python=3.11
+conda activate mujoco_tennis
+pip install -r requirements.txt
+
+# 或直接 pip 安装
 pip install -r requirements.txt
 ```
 
-依赖：`mujoco>=3.0`, `numpy`, `scipy`, `matplotlib`, `pyyaml`
+依赖：`mujoco>=3.0`, `numpy>=1.24`, `scipy>=1.10`, `matplotlib>=3.7`, `pyyaml>=6.0`
 
 ---
 
@@ -44,6 +49,14 @@ python scripts/rm65_joint_viewer.py
 
 打开后可拖动右侧 Control 面板滑条直接控制关节。按键：`R` 重置、`P` 打印、`F` 切换坐标轴。
 
+### 实时连续击打
+
+```bash
+python scripts/rm65_realtime_play.py
+python scripts/rm65_realtime_play.py --interval 3.0   # 每 3 秒发球
+python scripts/rm65_realtime_play.py --seed 42 --max-serves 10
+```
+
 ---
 
 ## 命令行参数 (`rm65_mpc_ilqr_5_5.py`)
@@ -53,25 +66,29 @@ python scripts/rm65_joint_viewer.py
 | `--viewer` | flag | — | 计算完成后 MuJoCo 查看器回放 |
 | `--seed` | int | None | 随机种子 |
 | `--fd` | flag | — | 有限差分线性化（默认解析） |
+| `--horizon` | int | None | 短地平线步数（覆盖 mpc.yaml） |
+| `--iter` | int | None | 每次重规划迭代数（覆盖 mpc.yaml） |
 | `--backswing` | float | 0.6 | 后摆幅度 (rad) |
 | `--bs-ratio` | float | 0.35 | 后摆占比 (0~1) |
 | `--no-backswing` | flag | — | 禁用后摆 |
-| `--r-decay` | float | 0.70 | R 退火占比 (0~1) |
+| `--r-decay` | float | 0.30 | R 退火占比 (0~1) |
 | `--no-r-decay` | flag | — | 禁用 R 退火 |
-| `--normal-weight` | float | 100000 | 拍面法向量代价权重 (0=禁用) |
+| `--normal-weight` | float | 500000 | 拍面法向量代价权重 (0=禁用) |
 | `--normal-flip` | flag | — | 翻转法向量方向 |
 | `--fix-joint5` | flag | — | 固定第 6 关节 |
-| `--hit-shift` | float | 0.0 | 击打目标前移 (m) |
+| `--hit-shift` | float | 0.01 | 击打目标沿挥拍方向前移 (m) |
+| `--ball-speed` | float | None | 球到达击打点时的速度 (m/s)，不指定则随机 |
 
 ---
 
 ## 目录结构
 
 ```
-tennis_robot/
+mujoco_sim/
 ├── README.md
 ├── requirements.txt
 ├── AGENTS.md                          # 项目开发规范（中文注释、类型提示等）
+├── MUJOCO-LOG.TXT                     # MuJoCo 运行日志
 │
 ├── configs/
 │   ├── default.yaml                   # 仿真参数、代价权重、网球参数、初始位姿
@@ -79,23 +96,22 @@ tennis_robot/
 │
 ├── scripts/
 │   ├── rm65_mpc_ilqr_5_5.py           # ★ 主脚本：MPC+iLQR 击打（后摆+退火+法向量）
+│   ├── rm65_mpc_ilqt.py               # MPC+iLQT 基线（无后摆优化）
 │   ├── rm65_joint_viewer.py           # 关节调节查看器（位置执行器，可拖动滑条）
-│   ├── rm65_mpc_ilqt.py               # 旧版 MPC 基线脚本
+│   ├── rm65_realtime_play.py          # 实时连续击打（自动发球循环）
 │   ├── run_rm65.py                    # 雅可比转置实时控制器
-│   ├── eval_sim.py                    # 仿真评估脚本
-│   ├── train_ilqt.py                  # 离线 iLQT 规划器（UR5e）
-│   ├── train_mpc.py                   # 离线 MPC 规划器（UR5e）
-│   └── rm65_realtime_play.py          # 实时播放器
+│   ├── train_ilqt.py                  # 离线 iLQT 规划器（UR5e 遗留）
+│   ├── train_mpc.py                   # 离线 MPC 规划器（UR5e 遗留）
+│   └── eval_sim.py                    # 仿真评估脚本（UR5e 遗留）
 │
 ├── src/
 │   ├── robot/
 │   │   ├── rm65_model.xml             # RM-65 双臂 + 球拍 MuJoCo 模型（唯一真相源）
-│   │   ├── model.xml                  # UR5e 右臂模型
-│   │   ├── kinematics.py              # 正运动学 / 雅可比矩阵
-│   │   └── meshes/                    # STL 网格文件
+│   │   ├── model.xml                  # UR5e 右臂模型（遗留）
+│   │   └── kinematics.py              # 正运动学 / 雅可比矩阵
 │   ├── sim/
 │   │   ├── rm65_env.py                # RM-65 MuJoCo 环境封装（双臂 + 球 + 碰撞 + 弹跳）
-│   │   ├── env.py                     # UR5e MuJoCo 环境封装
+│   │   ├── env.py                     # UR5e MuJoCo 环境封装（遗留）
 │   │   └── viewer.py                  # 可视化工具（离线回放 + matplotlib 绘图）
 │   ├── ilqt/
 │   │   ├── solver.py                  # ILQTSolver（后向递推 + solve_few_iters）
@@ -105,15 +121,27 @@ tennis_robot/
 │   │   ├── linearize.py               # 解析/有限差分动力学线性化（A, B 矩阵）
 │   │   └── simulate.py                # 前向仿真 / rollout
 │   ├── tennis/
-│   │   ├── ball.py                    # 网球抛物线轨迹生成 + 由目标反推初速
-│   │   └── hitting.py                 # 击打点搜索（MuJoCo 物理仿真 + 打分筛选）
+│   │   ├── ball.py                    # 网球抛物线轨迹 + 弹跳模型 + 发球生成
+│   │   └── hitting.py                 # 击打点搜索（解析 + 物理仿真）+ 权重调度
 │   └── utils/
 │       └── math_utils.py              # 通用数学工具
 │
 ├── tests/                             # 单元测试
-├── docs/                              # 文档
-├── results/                           # 输出（图片、日志）
-└── assets/rm_65/                      # RM-65 机器人资产（URDF、网格、感知模型）
+│   ├── test_kinematics.py             # 运动学 + 模型加载测试
+│   ├── test_ball.py                   # 球轨迹 + 弹跳模型测试
+│   ├── test_linearize.py              # 解析 vs 有限差分线性化一致性测试
+│   └── test_mpc.py                    # 权重调度 + MPC 组件测试
+│
+├── skills/                            # Agent Skill 定义
+│   ├── framework_design.md            # 代码框架设计 skill
+│   ├── file_management.md             # 文件管理 skill
+│   └── sim_run.md                     # 仿真运行 skill
+│
+├── docs/
+│   └── rm65_tennis_report.md          # 项目技术报告
+│
+└── assets/
+    └── rm_65/                         # RM-65 机器人资产（URDF、STL 网格）
 ```
 
 ---
@@ -123,9 +151,9 @@ tennis_robot/
 ### MPC + iLQR 闭环架构
 
 ```
-每 10 步重规划:
+每 15 步重规划（由 mpc.yaml 中 replan_interval 控制）:
   1. 观测球当前位置和速度
-  2. find_hitting_point_physics → 预测击打点
+  2. find_hitting_point_physics → 物理仿真预测击打点
   3. 构建代价函数 HittingCost（终端位置+速度+法向量）
   4. 生成 Warm-start 控制序列（后摆轨迹 PD）
   5. solve_few_iters → iLQR 优化轨迹
@@ -156,19 +184,35 @@ score = 距离 + 高度惩罚 − 前方优先
 
 ---
 
-## 配置文件 (`configs/default.yaml`)
+## 配置文件
+
+### `configs/default.yaml` — 基础参数
 
 ```yaml
 sim:
   dt: 0.005              # 仿真步长 (s)
 
 cost:
-  Q_p: [2000, 2000, 2000]       # 终端位置代价权重
-  Q_v: [50000, 50000, 50000]    # 终端速度代价权重
-  R: 0.000001                    # 控制代价权重
+  Q_p: [50000, 50000, 50000]   # 终端位置代价权重
+  Q_v: [200, 200, 200]         # 终端速度代价权重
+  R: 0.0001                    # 控制代价权重
 
 hitting:
-  racket_speed: 10.0             # 期望击球速度 (m/s)
-  hit_direction: [-1, 0, 0.3]    # 挥拍方向
-  workspace_radius: 0.85         # 工作空间半径 (m)
+  racket_speed: 5.0             # 期望击球速度 (m/s)
+  hit_direction: [0.0, -1.0, 0.3]  # 挥拍方向
+  workspace_radius: 0.85        # 工作空间半径 (m)
+  shoulder_pos: [0.0, -0.12, 1.163]  # 肩关节世界坐标
+```
+
+### `configs/mpc.yaml` — MPC 专用参数
+
+```yaml
+mpc:
+  total_horizon: 200           # 总仿真步数
+  fixed_horizon: 20            # 短地平线步数
+  replan_interval: 15          # 重规划间隔
+  max_iter_per_plan: 2         # 每次重规划迭代数
+  use_analytical: true         # 使用解析线性化
+  use_bounce: true             # 启用弹跳模型
+  bounce_restitution: 0.75     # 弹跳恢复系数
 ```
