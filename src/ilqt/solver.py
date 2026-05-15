@@ -4,7 +4,7 @@ import logging
 import numpy as np
 from src.sim.env import MujocoEnv
 from src.dynamics.linearize import linearize_trajectory, linearize_analytical_trajectory
-from src.ilqt.cost import HittingCost
+from src.ilqt.costs.base import BaseCost
 from src.ilqt.utils import (
     compute_total_cost,
     forward_pass_with_linesearch,
@@ -53,7 +53,7 @@ class ILQTSolver:
     def solve(
         self,
         env: MujocoEnv,
-        cost_fn: HittingCost,
+        cost_fn: BaseCost,
         x0: np.ndarray,
         U_init: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray, list[float]]:
@@ -139,7 +139,7 @@ class ILQTSolver:
     def solve_few_iters(
         self,
         env: MujocoEnv,
-        cost_fn: HittingCost,
+        cost_fn: BaseCost,
         x0: np.ndarray,
         U_init: np.ndarray,
         max_iter: int = 3,
@@ -234,7 +234,7 @@ class ILQTSolver:
         return X
 
     def _running_cost_derivatives(
-        self, cost_fn: HittingCost, X: np.ndarray, U: np.ndarray
+        self, cost_fn: BaseCost, X: np.ndarray, U: np.ndarray
     ) -> tuple[list, list, list, list, list]:
         """计算所有时间步的运行代价导数。"""
         N = len(U)

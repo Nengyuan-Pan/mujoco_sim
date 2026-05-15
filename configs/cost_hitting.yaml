@@ -1,0 +1,16 @@
+# HittingCost 代价函数配置
+# 对应 src/ilqt/costs/hitting.py 的 from_config 接口
+
+terminal:
+  Q_p: [50000.0, 50000.0, 50000.0]   # 终端位置代价权重 (对角线)
+  Q_v: [200.0, 200.0, 200.0]         # 终端速度代价权重 (对角线)
+  Q_n: 500000.0                       # 拍面法向量代价权重 (0=禁用)
+
+control:
+  R: 0.0001                           # 基础控制代价权重
+
+running:
+  Q_p_ratio: 0.0                      # 运行位置代价比例 (相对 Q_p)
+
+joint_tracking:
+  Q_joint: {0: 500.0}                 # 关节跟踪权重，格式 {关节索引: 权重}

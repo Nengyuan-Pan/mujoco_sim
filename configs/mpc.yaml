@@ -1,4 +1,5 @@
 mpc:
+  cost_type: hitting
   total_horizon: 200
   fixed_horizon: 20
   replan_interval: 15

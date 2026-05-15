@@ -2,12 +2,12 @@
 
 import numpy as np
 from src.sim.env import MujocoEnv
-from src.ilqt.cost import HittingCost
+from src.ilqt.costs.base import BaseCost
 
 
 def compute_total_cost(
     env: MujocoEnv,
-    cost_fn: HittingCost,
+    cost_fn: BaseCost,
     X: np.ndarray,
     U: np.ndarray,
 ) -> float:
@@ -31,7 +31,7 @@ def compute_total_cost(
 
 def forward_pass_with_linesearch(
     env: MujocoEnv,
-    cost_fn: HittingCost,
+    cost_fn: BaseCost,
     X: np.ndarray,
     U: np.ndarray,
     Ks: list[np.ndarray],
@@ -96,7 +96,7 @@ def forward_pass_with_linesearch(
 
 def forward_pass_single(
     env: MujocoEnv,
-    cost_fn: HittingCost,
+    cost_fn: BaseCost,
     X: np.ndarray,
     U: np.ndarray,
     Ks: list[np.ndarray],
