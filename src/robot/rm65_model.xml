@@ -1,4 +1,4 @@
-<mujoco model="rm65_tennis_robot">
+﻿<mujoco model="rm65_tennis_robot">
   <!--
     RM-65 双臂机器人 MuJoCo 模型（网球挥拍场景）
     基于 overseas_65_corrected.urdf，做如下修改：
@@ -7,11 +7,12 @@
     3. 左臂保留但不驱动，用于视觉完整性
     4. 使用 STL 网格渲染 + 简化碰撞体（capsule）
     碰撞方案（位掩码）：
-    - 地面:         contype=1,  conaffinity=11 (1+2+8) — 与机器人、球碰撞
-    - 机器人结构:    contype=2,  conaffinity=2          — 机器人各部位之间自碰撞
-    - 球拍:         contype=4,  conaffinity=8          — 只和球碰撞
-    - 网球:         contype=8,  conaffinity=5 (1+4)    — 和地面、球拍碰撞
-    - 视觉网格:     contype=0,  conaffinity=0          — 仅渲染
+    - 地面:         contype=1,  conaffinity=31 (1+2+4+8+16) — 万能碰撞
+     - 身体结构:     contype=2,  conaffinity=5  (1+4)        — 与地面、右臂碰撞
+     - 右臂碰撞体:   contype=4,  conaffinity=5  (1+4)        — 与地面、其他臂段碰撞（已排除身体碰撞）
+     - 球拍:         contype=8,  conaffinity=16              — 只和球碰撞
+     - 网球:         contype=16, conaffinity=11 (1+2+8)      — 和地面、身体、球拍碰撞
+     - 视觉网格:     contype=0,  conaffinity=0              — 仅渲染
     关节轴：所有臂关节 URDF axis="0 0 1"，通过帧旋转映射到 MuJoCo 局部轴
   -->
   <option gravity="0 0 -9.81" timestep="0.005" integrator="implicitfast"/>
@@ -23,25 +24,26 @@
     <default class="arm_visual">
       <geom contype="0" conaffinity="0"/>
     </default>
-    <!-- 身体结构碰撞：不参与自碰撞，但与地面碰撞 -->
+    <!-- 身体结构碰撞：与地面、右臂碰撞 -->
     <default class="col_body">
-      <geom contype="1" conaffinity="1" rgba="0 0 1 0.15" group="1"/>
+      <geom contype="2" conaffinity="5" rgba="0 0 1 0.15" group="1"/>
     </default>
-    <!-- 臂段碰撞：参与自碰撞（臂与臂、非相邻连杆之间） -->
+    <!-- 臂段碰撞：与地面、其他臂段碰撞（已排除身体，由 iLQT 代价规避） -->
     <default class="col_arm">
-      <geom contype="2" conaffinity="2" rgba="1 0 0 0.15" group="1"/>
+      <geom contype="4" conaffinity="5" rgba="1 0 0 0.15" group="1"/>
     </default>
     <default class="racket">
-      <geom contype="4" conaffinity="8"/>
+      <geom contype="8" conaffinity="16"/>
     </default>
     <default class="ball">
-      <geom contype="8" conaffinity="5"/>
+      <geom contype="16" conaffinity="10"/>
     </default>
   </default>
 
   <!-- 排除相邻臂段的碰撞（共享关节的连杆不应碰撞） -->
   <!-- 以及同臂非相邻但总在穿透的 link4-link6 对 -->
   <contact>
+    <!-- 排除右臂相邻段碰撞 -->
     <exclude body1="r_base_link1" body2="r_link1"/>
     <exclude body1="r_link1" body2="r_link2"/>
     <exclude body1="r_link2" body2="r_link3"/>
@@ -49,6 +51,9 @@
     <exclude body1="r_link4" body2="r_link5"/>
     <exclude body1="r_link5" body2="r_link6"/>
     <exclude body1="r_link4" body2="r_link6"/>
+    <!-- 右臂base与link3初始穿透（非相邻但距离很近） -->
+    <exclude body1="r_base_link1" body2="r_link3"/>
+    <!-- 排除左臂相邻段碰撞 -->
     <exclude body1="l_base_link1" body2="l_link1"/>
     <exclude body1="l_link1" body2="l_link2"/>
     <exclude body1="l_link2" body2="l_link3"/>
@@ -56,6 +61,16 @@
     <exclude body1="l_link4" body2="l_link5"/>
     <exclude body1="l_link5" body2="l_link6"/>
     <exclude body1="l_link4" body2="l_link6"/>
+    <!-- 左臂base与link3初始穿透 -->
+    <exclude body1="l_base_link1" body2="l_link3"/>
+    <!-- 排除臂底座与平台的碰撞（紧贴安装） -->
+    <exclude body1="r_base_link1" body2="platform_base_link"/>
+    <exclude body1="l_base_link1" body2="platform_base_link"/>
+    <!-- 排除左右臂底座之间的碰撞（紧贴安装在同一平台） -->
+    <exclude body1="r_base_link1" body2="l_base_link1"/>
+    <!-- 排除臂link3与平台碰撞（初始姿态下紧贴） -->
+    <exclude body1="r_link3" body2="platform_base_link"/>
+    <exclude body1="l_link3" body2="platform_base_link"/>
     <!-- 球拍-球弹性碰撞：零阻尼实现完美弹性碰撞 -->
     <pair geom1="r_racket_face" geom2="ball" condim="1" solref="-5000 0" solimp="0.9 0.99 0.001"/>
   </contact>
@@ -88,13 +103,38 @@
     <!-- 轮子 -->
     <mesh name="link_left_wheel"  file="../../assets/rm_65/urdf/meshes/link_left_wheel.STL"/>
     <mesh name="link_right_wheel" file="../../assets/rm_65/urdf/meshes/link_right_wheel.STL"/>
+    <!-- 网球场地板纹理 -->
+    <texture name="court_grid" type="2d" builtin="checker" rgb1="0.28 0.42 0.22" rgb2="0.24 0.38 0.20" width="512" height="512" mark="edge" markrgb="0.9 0.95 0.85"/>
+    <material name="court_floor" texture="court_grid" texrepeat="8 8" reflectance="0.15" rgba="0.28 0.42 0.22 1"/>
   </asset>
 
   <worldbody>
-    <light pos="0 0 3" dir="0 0 -1" diffuse="0.9 0.9 0.9"/>
+    <!-- 天光：正上方强光模拟天空漫射 -->
+    <light pos="0 0 8" dir="0 0 -1" diffuse="1.4 1.45 1.55" ambient="0.3 0.3 0.35" specular="0.5 0.5 0.5"/>
+    <!-- 主光：右上方暖白 -->
+    <light pos="2 -2 3" dir="-0.4 0.3 -0.8" diffuse="1.2 1.15 1.05" specular="0.6 0.6 0.6"/>
+    <!-- 补光：左前方冷白 -->
+    <light pos="-1.5 -1 2.5" dir="0.3 0.2 -0.7" diffuse="0.8 0.85 0.95"/>
+    <!-- 背光：后方轮廓 -->
+    <light pos="0 2 2" dir="0 -0.5 -0.6" diffuse="0.5 0.5 0.55"/>
 
-    <!-- 地面（conaffinity=15=1+2+4+8，与机器人+球拍+球碰撞） -->
-    <geom type="plane" size="25 25 0.1" rgba="0.3 0.35 0.3 1" contype="1" conaffinity="15"/>
+    <!-- 网球场地板（碰撞体） -->
+    <geom type="plane" size="25 25 0.1" rgba="0.28 0.42 0.22 1" material="court_floor" contype="1" conaffinity="31"/>
+    <!-- 场地白线装饰（不参与碰撞） -->
+    <geom type="plane" size="12 0.05 0.001" pos="0 0 0.001" rgba="1 1 1 1" contype="0" conaffinity="0"/>
+    <geom type="plane" size="0.05 12 0.001" pos="0 0 0.001" rgba="1 1 1 1" contype="0" conaffinity="0"/>
+    <!-- 底线 -->
+    <geom type="plane" size="0.05 6 0.001" pos="-6 0 0.001" rgba="1 1 1 1" contype="0" conaffinity="0"/>
+    <geom type="plane" size="0.05 6 0.001" pos="6 0 0.001" rgba="1 1 1 1" contype="0" conaffinity="0"/>
+    <!-- 发球线 -->
+    <geom type="plane" size="0.05 5 0.001" pos="-3 0 0.001" rgba="1 1 1 1" contype="0" conaffinity="0"/>
+    <geom type="plane" size="0.05 5 0.001" pos="3 0 0.001" rgba="1 1 1 1" contype="0" conaffinity="0"/>
+    <!-- 发球区中线 -->
+    <geom type="plane" size="3 0.05 0.001" pos="-4.5 0 0.001" rgba="1 1 1 1" contype="0" conaffinity="0"/>
+    <geom type="plane" size="3 0.05 0.001" pos="4.5 0 0.001" rgba="1 1 1 1" contype="0" conaffinity="0"/>
+    <!-- 双打边线 -->
+    <geom type="plane" size="0.05 12 0.001" pos="0 -5 0.001" rgba="1 1 1 1" contype="0" conaffinity="0"/>
+    <geom type="plane" size="0.05 12 0.001" pos="0 5 0.001" rgba="1 1 1 1" contype="0" conaffinity="0"/>
 
     <!-- ===== 底盘 ===== -->
     <body name="base_link_underpan" pos="0 0 0">
@@ -263,6 +303,8 @@
     <!-- ===== 网球 ===== -->
     <body name="ball" pos="5 0 2">
       <freejoint name="ball_freejoint"/>
+      <!-- 球跟随灯光：让球在飞行中始终被照亮 -->
+      <light pos="0 0 0.5" dir="0 0 -1" diffuse="0.8 0.7 0.4" attenuation="1 0.05 0.01"/>
       <geom name="ball" type="sphere" size="0.033" rgba="0.95 0.95 0.1 1" mass="0.058" class="ball"/>
     </body>
 

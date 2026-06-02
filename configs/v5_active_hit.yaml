@@ -1,0 +1,24 @@
+# v5 配置：主动击打（Active Hitting）
+# 核心改动：iLQR 终端 = 随挥终点（击球点前方），击球时刻在轨迹中段
+# 继承 default.yaml，仅覆盖需要修改的字段
+
+hitting:
+  racket_speed: 1.8              # 匹配 TCP 硬限制
+  hit_direction: [0.0, -1.0, 0.3]
+  workspace_radius: 0.85
+  shoulder_pos: [0.0, -0.12, 1.163]
+  hit_offset_x_range: [0.10, 0.40]
+  hit_offset_y_range: [-0.25, 0.25]
+  hit_offset_z_range: [-0.15, 0.30]
+  # 随挥参数
+  follow_through_length: 0.5    # 随挥距离 (m)：增大到 0.5m 以增加加速段
+  follow_through_steps: 60      # 随挥步数 (60*5ms=300ms)
+  follow_through_v_terminal: 0.3  # 随挥终端速度 (m/s)
+
+cost:
+  Q_p: [50000.0, 50000.0, 50000.0]
+  Q_v: [200.0, 200.0, 200.0]
+  R: 0.0001
+  Q_qdot: 0.001
+  Q_qddot: 0.0005
+  Q_du: 0.001

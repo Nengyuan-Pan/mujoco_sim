@@ -245,3 +245,58 @@ def linearize_analytical_trajectory(
         fs.append(f_k)
 
     return As, Bs, fs
+
+
+def linearize_fast_trajectory(
+    env: MujocoEnv,
+    X: np.ndarray,
+    U: np.ndarray,
+) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
+    """沿轨迹快速线性化（仅计算 M^{-1}，跳过 ∂h/∂q 和 ∂h/∂qdot 有限差分）。
+
+    A 近似为 [I, dt*I; 0, I]（忽略重力和科氏力对 A 的影响），
+    B = [0; dt*M^{-1}]（使用解析质量矩阵）。
+    f 通过完整动力学 step_from_state 计算，保证前向传递精度。
+
+    适用于 far 阶段 MPC 重规划：线性模型精度较低但计算速度约快 10×。
+
+    Args:
+        env: MuJoCo 环境实例。
+        X: 状态轨迹，形状 (N+1, 12)。
+        U: 控制轨迹，形状 (N, 6)。
+
+    Returns:
+        (As, Bs, fs): 每步的 A_k, B_k, f_k 列表，各长度 N。
+    """
+    nv = env.NQ
+    n_x = env.NX
+    n_u = env.NU
+    dt = env.dt
+    model = env.model
+    data = env.data
+
+    As: list[np.ndarray] = []
+    Bs: list[np.ndarray] = []
+    fs: list[np.ndarray] = []
+
+    for k in range(len(U)):
+        env.set_arm_state(X[k])
+
+        M_full = np.zeros((model.nv, model.nv))
+        mujoco.mj_fullM(model, M_full, data.qM)
+        M = M_full[:nv, :nv].copy()
+        M_inv = np.linalg.solve(M, np.eye(nv))
+
+        A_k = np.eye(n_x)
+        A_k[:nv, nv:] = dt * np.eye(nv)
+
+        B_k = np.zeros((n_x, n_u))
+        B_k[nv:, :] = dt * M_inv
+
+        f_k = env.step_from_state(X[k], U[k])
+
+        As.append(A_k)
+        Bs.append(B_k)
+        fs.append(f_k)
+
+    return As, Bs, fs

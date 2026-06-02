@@ -162,6 +162,27 @@ class RM65Env:
         )
         return (jacp[:, : self.NQ] @ self.data.qvel[: self.NQ]).copy()
 
+    def get_racket_face_speed(self) -> float:
+        """获取球拍面中心线速度标量 [m/s]。
+
+        v_face = v_tcp + ω × racket_offset
+        其中 racket_offset = [0, 0, 0.25]（球拍中心相对法兰的偏移）。
+        """
+        v_tcp = self.get_ee_vel()
+        omega = self.get_ee_angular_vel()
+        racket_offset_local = np.array([0.0, 0.0, 0.25])
+        v_face = v_tcp + np.cross(omega, racket_offset_local)
+        return float(np.linalg.norm(v_face))
+
+    def get_ee_angular_vel(self) -> np.ndarray:
+        """获取球拍中心角速度，形状 (3,)。"""
+        jacp = np.zeros((3, self.model.nv))
+        jacr = np.zeros((3, self.model.nv))
+        mujoco.mj_jacSite(
+            self.model, self.data, jacp, jacr, self.racket_center_id
+        )
+        return (jacr[:, : self.NQ] @ self.data.qvel[: self.NQ]).copy()
+
     def get_ee_jacp(self) -> np.ndarray:
         """获取球拍中心位置雅可比矩阵，形状 (3, 6)。"""
         jacp = np.zeros((3, self.model.nv))
@@ -182,6 +203,33 @@ class RM65Env:
             self.model, self.data, jacp, jacr, self.racket_center_id
         )
         return jacr[:, : self.NQ].copy()
+
+    def get_body_pos_by_id(self, body_id: int) -> np.ndarray:
+        """获取指定刚体帧原点的世界坐标位置。
+
+        Args:
+            body_id: MuJoCo body ID。
+
+        Returns:
+            世界坐标位置，形状 (3,)。
+        """
+        return self.data.xpos[body_id].copy()
+
+    def get_body_jacp_by_id(self, body_id: int) -> np.ndarray:
+        """获取指定刚体帧原点的位置雅可比矩阵。
+
+        使用 mj_jac 计算 body 局部坐标零点相对于关节速度的雅可比。
+
+        Args:
+            body_id: MuJoCo body ID。
+
+        Returns:
+            位置雅可比矩阵，形状 (3, 6)。
+        """
+        jacp = np.zeros((3, self.model.nv))
+        jacr = np.zeros((3, self.model.nv))
+        mujoco.mj_jac(self.model, self.data, jacp, jacr, np.zeros(3), body_id)
+        return jacp[:, : self.NQ].copy()
 
     def get_ee_normal(self) -> np.ndarray:
         """获取球拍面法向量（球拍局部 X 轴在世界坐标系中的方向）。

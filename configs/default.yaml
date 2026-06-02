@@ -1,4 +1,4 @@
-# 仿真参数
+﻿# 仿真参数
 sim:
   dt: 0.005              # 仿真时间步长（秒），必须与MuJoCo模型timestep一致
 
@@ -25,6 +25,24 @@ cost:
   Q_p: [50000.0, 50000.0, 50000.0]
   Q_v: [200.0, 200.0, 200.0]
   R: 0.0001
+  Q_qdot: 0.001                   # 关节速度软平滑（极小值，不压制挥拍）
+  Q_qddot: 0.0005                 # 关节加速度软平滑
+  Q_du: 0.001                     # 控制变化率软平滑
+
+# 分阶段权重调度（Q_qdot/Q_qddot/Q_du 乘数）
+stage_weights:
+  far:     # k_hit > 50: 基础平滑
+    Q_qdot_mult: 1.0
+    Q_qddot_mult: 1.0
+    Q_du_mult: 1.0
+  mid:     # k_hit 20~50: 中等平滑
+    Q_qdot_mult: 2.0
+    Q_qddot_mult: 2.0
+    Q_du_mult: 2.0
+  near:    # k_hit <= 20: 适度平滑，不压制挥拍
+    Q_qdot_mult: 0.0
+    Q_qddot_mult: 0.0
+    Q_du_mult: 0.0
 
 # 初始关节角度（弧度）— UR5e 准备姿势（臂前伸，球拍在前方）
 init_q: [0.0, -1.2, 1.8, -0.6, 0.0, 0.0]
@@ -54,6 +72,39 @@ hitting:
   hit_offset_x_range: [0.10, 0.40]
   hit_offset_y_range: [-0.25, 0.25]
   hit_offset_z_range: [-0.15, 0.30]
+
+# REALMAN RM65-B 真实机器人硬约束
+robot_limits:
+  # 关节角度范围 (deg)，读取后统一转 rad
+  q_min_deg: [-178, -130, -135, -178, -128, -360]
+  q_max_deg: [ 178,  130,  135,  178,  128,  360]
+  q_margin_deg: [2, 1, 3, 3, 3, 3]  # J0=2° J1=1° J2-J5=3°(放宽腕关节)
+
+  # 关节速度上限 (deg/s)，读取后统一转 rad/s
+  qdot_max_deg_s: [180, 180, 225, 225, 225, 225]
+  qdot_scale: 1.0              # 速度安全系数 100%（严格模式）
+
+  # 关节加速度上限 (deg/s²)，读取后统一转 rad/s²
+  # 真实机器人值（电机可达到的水平），使用滑动窗口估算
+  qddot_max_deg_s2: [400, 400, 500, 500, 500, 500]
+  qddot_scale: 0.85               # 加速度安全系数 85%
+  qddot_window: 5                # 滑动窗口步数（5步=25ms@200Hz，等效40Hz低通）
+  qddot_hard_reject: false       # Phase1: false=仅日志+软代价；Phase2: true=硬拒绝
+  qdot_window: 3                 # qdot 滑动窗口步数（用于qddot估算）
+
+  # 扭矩限制 (Nm)，null = 自动从 MuJoCo actuator_ctrlrange 读取
+  u_min: null
+  u_max: null
+
+  # 前向传递约束检查的 alpha 回退列表
+  alpha_fallback: [0.5, 0.3, 0.2, 0.1, 0.05]
+
+  # 前向传递中的约束裕度（>1.0 放宽搜索空间，执行层仍严格检查）
+  forward_pass_margin: 1.0
+  forward_pass_q_tol_deg: 0.0     # 前向传递 q 额外容忍度 (deg)，0=严格
+
+  # TCP 线速度硬限制 (m/s)
+  max_tcp_speed: 1.8
 
 # 可视化参数
 viewer:

@@ -1,14 +1,9 @@
-# AGENTS.md - RM-65 网球机器人项目规范
+# AGENTS.md - Tennis Robot 项目规范
 
 ## 项目概述
-本项目使用 **MPC（模型预测控制）+ iLQR（迭代线性二次调节器）** 闭环架构，
-解决 **RM-65 双臂人形机器人**网球击打场景。外层 MPC 每隔若干步重规划，
-内层 iLQR 求解短地平线最优轨迹。包含后摆 Warm-start、R 退火调度、
-拍面法向量约束等优化策略。球和机械臂均由 MuJoCo 物理引擎驱动，
-球拍-球碰撞产生真实击打效果。
-
-历史背景：项目最初基于 UR5e 单臂 + 纯 iLQT 离线规划（代码保留在 `model.xml` /
-`env.py` / `train_ilqt.py` 中），现已全面迁移到 RM-65 双臂 + MPC+iLQR 在线闭环。
+本项目使用 iLQT（迭代线性二次跟踪器）传统最优控制方法，解决 UR5e 机械臂挥拍击打网球的场景。
+机器人模型为**UR5e（6自由度工业机械臂）**，安装在垂直桩柱右侧，末端法兰上连接垂直网球拍，
+在给定网球飞来轨迹的情况下，计算最优挥拍轨迹，使末端执行器（球拍面）在正确的时间和位置以期望的速度击中网球。
 
 ## 语言与注释规范
 - **所有代码使用 Python 编写**
@@ -20,272 +15,115 @@
 
 ## 技术栈
 - **语言**: Python 3.9+
-- **仿真**: MuJoCo（mujoco Python 包 >= 3.0）— 跨平台 Windows/Ubuntu
+- **仿真**: MuJoCo（mujoco Python 包）— 跨平台 Windows/Ubuntu
 - **数值计算**: NumPy, SciPy
 - **可视化**: MuJoCo 内置查看器 + matplotlib（轨迹绘图）
 - **包管理**: pip + requirements.txt
 
 ## 机器人模型定义
+UR5e 6 自由度，关节分配如下：
 
-### 主模型：RM-65 双臂（`src/robot/rm65_model.xml`）
-RM-65 人形机器人，仅驱动右臂 6-DOF 挥拍，左臂 6-DOF 保持零位（PD 控制）。
-底盘固定在地面上，腰部升降关节已固定。
+| 关节编号 | 关节名称             | 说明                           | 力矩限制 (Nm) |
+|----------|----------------------|--------------------------------|---------------|
+| 0        | shoulder_pan         | 肩关节偏航（绕 Z 旋转）        | ±150          |
+| 1        | shoulder_lift        | 肩关节俯仰（绕 Y 旋转）        | ±150          |
+| 2        | elbow                | 肘关节（绕 Y 旋转）            | ±150          |
+| 3        | wrist_1              | 腕关节 1（绕 Y 旋转）          | ±28           |
+| 4        | wrist_2              | 腕关节 2（绕 Z 旋转）          | ±28           |
+| 5        | wrist_3              | 腕关节 3（绕 Y 旋转）          | ±28           |
 
-#### 右臂关节分配
-
-| 关节编号 | MuJoCo 关节名  | 说明                       | ctrlrange (Nm) | range (deg) |
-|----------|----------------|----------------------------|----------------|-------------|
-| 0        | r_joint1       | 肩关节偏航（绕局部 Z）     | ±60            | ±178        |
-| 1        | r_joint2       | 肩关节俯仰（绕局部 Z）     | ±60            | ±130        |
-| 2        | r_joint3       | 肘关节（绕局部 Z）         | ±30            | ±135        |
-| 3        | r_joint4       | 腕关节 1（绕局部 Z）       | ±10            | ±178        |
-| 4        | r_joint5       | 腕关节 2（绕局部 Z）       | ±10            | ±128        |
-| 5        | r_joint6       | 腕关节 3 / 法兰旋转        | ±10            | ±360        |
-
-左臂关节名：`l_joint1` ~ `l_joint6`，参数相同，但不参与规划。
-
-#### 状态向量（`RM65Env` 视角）
-- **右臂状态**（iLQR 规划用）: `x = [q(6), qdot(6)]` ∈ R^12
-- **控制向量**: `u = tau(6)` ∈ R^6（右臂关节力矩）
-- **MuJoCo qpos 布局**: 右臂 `[0:6]`，左臂 `[6:12]`，球 freejoint `[12:19]`
-- **MuJoCo qvel 布局**: 右臂 `[0:6]`，左臂 `[6:12]`，球 `[12:18]`
-- **执行器 ctrl 布局**: 右臂 `[0:6]`，左臂 `[6:12]`
-- **末端执行器**: `racket_center` site（球拍面中心点）
-- **球拍**: 从法兰沿手柄延伸，拍面法线沿 Y 方向（与法兰 Z 轴呈 90°）
-
-#### 碰撞位掩码方案
-| 对象           | contype | conaffinity | 碰撞对象           |
-|----------------|---------|-------------|---------------------|
-| 地面           | 1       | 15 (1+2+4+8)| 机器人+球拍+球      |
-| 机器人结构体   | 1       | 1           | 地面                |
-| 机械臂连杆     | 2       | 2           | 臂间自碰撞          |
-| 球拍           | 4       | 8           | 仅球                |
-| 球             | 8       | 5 (1+4)     | 地面+球拍           |
-| 视觉网格       | 0       | 0           | 无碰撞（仅渲染）    |
-
-### 遗留模型：UR5e（`src/robot/model.xml`）
-UR5e 6-DOF 单臂模型，仅用于 `train_ilqt.py` 离线规划。MuJoCo 模型中关节名为
-`shoulder_pan_joint`、`shoulder_lift_joint` 等（menagerie 风格，带 `_joint` 后缀）。
-不再作为主要开发目标。
+- 状态向量: x = [q(6), qdot(6)] ∈ R^12  （关节位置 + 关节速度）
+- 控制向量: u = tau(6) ∈ R^6            （关节力矩）
+- 末端执行器: 球拍面中心点（racket center）
+- UR5e 臂展: 850mm
+- 球拍: 连杆沿法兰局部 X 方向延伸（垂直于法兰轴），球拍面在连杆末端
 
 ## 项目目录结构
 ```
-mujoco_sim/
-├── AGENTS.md                          # 本文件 — 项目规范与 Agent 指令
-├── README.md                          # 项目说明文档
-├── requirements.txt                   # Python 依赖
-├── MUJOCO-LOG.TXT                     # MuJoCo 运行日志
-│
-├── skills/                            # Skill 定义，供 Agent 工作流调用
-│   ├── framework_design.md            # 代码框架设计 skill
-│   ├── file_management.md             # 文件管理 skill
-│   └── sim_run.md                     # 仿真运行 skill
-│
-├── configs/
-│   ├── default.yaml                   # 默认超参数（仿真、iLQT、代价、球、击打）
-│   ├── mpc.yaml                       # MPC 专用参数 + cost_type 切换
-│   └── cost_hitting.yaml              # HittingCost 代价权重（终端/控制/运行/关节跟踪）
-│
+tennis_robot/
+├── AGENTS.md                # 本文件 — 项目规范与 Agent 指令
+├── skills/                  # Skill 定义，供 Agent 工作流调用
+│   ├── framework_design.md  # 代码框架设计 skill
+│   ├── file_management.md   # 文件管理 skill
+│   └── sim_run.md           # 仿真运行 skill
 ├── src/
 │   ├── __init__.py
-│   ├── robot/                         # 机器人模型定义
+│   ├── robot/               # 机器人模型定义
 │   │   ├── __init__.py
-│   │   ├── rm65_model.xml             # ★ RM-65 双臂 + 球拍 MuJoCo 模型（主模型）
-│   │   ├── model.xml                  # UR5e 单臂模型（遗留，仅 train_ilqt.py 使用）
-│   │   └── kinematics.py              # 正运动学 / 雅可比矩阵 / 工作空间估计
-│   ├── dynamics/                      # 动力学计算
+│   │   ├── model.xml        # MuJoCo XML 模型（右臂6DOF + 球拍）
+│   │   └── kinematics.py    # 正运动学 / 雅可比矩阵工具
+│   ├── dynamics/            # 动力学计算
 │   │   ├── __init__.py
-│   │   ├── linearize.py               # 动力学线性化（有限差分 + 解析两种实现）
-│   │   └── simulate.py                # 前向仿真 / rollout
-│   ├── ilqt/                          # iLQR/iLQT 求解器核心
+│   │   ├── linearize.py     # 动力学线性化（fx, fu），供 iLQT 使用
+│   │   └── simulate.py      # 前向仿真 / rollout
+│   ├── ilqt/                # iLQT 求解器核心
 │   │   ├── __init__.py
-│   │   ├── solver.py                  # ILQTSolver（后向递推 + solve_few_iters）
-│   │   ├── utils.py                   # 前向传递 + 线搜索 + 正则化
-│   │   ├── cost.py                    # 向后兼容 shim，重导出 HittingCost
-│   │   └── costs/                     # ★ 代价函数子包（插件化架构）
-│   │       ├── __init__.py            # COST_REGISTRY 注册表 + create_cost 工厂
-│   │       ├── base.py                # BaseCost(ABC) + EndEffectorCost
-│   │       └── hitting.py             # HittingCost 具体实现
-│   ├── tennis/                        # 网球场景相关
+│   │   ├── solver.py        # iLQT 后向-前向迭代主循环
+│   │   ├── cost.py          # 代价函数（末端击打点代价 + 控制代价）
+│   │   └── utils.py         # 增益计算、线搜索、正则化辅助函数
+│   ├── tennis/              # 网球场景相关
 │   │   ├── __init__.py
-│   │   ├── ball.py                    # 抛物线轨迹 + 弹跳模型 + 发球生成
-│   │   └── hitting.py                 # 击打点搜索（解析+物理仿真）+ 权重调度
-│   ├── sim/                           # MuJoCo 仿真封装
+│   │   ├── ball.py          # 网球抛物线轨迹预测
+│   │   └── hitting.py       # 击打点计算 & 球拍-球接触判断
+│   ├── sim/                 # MuJoCo 仿真封装
 │   │   ├── __init__.py
-│   │   ├── rm65_env.py                # ★ RM65Env（双臂+球+碰撞+弹跳）
-│   │   ├── env.py                     # MujocoEnv（UR5e 遗留环境）
-│   │   └── viewer.py                  # 可视化（MuJoCo 回放 + matplotlib 绘图）
+│   │   ├── env.py           # MuJoCo 环境封装类
+│   │   └── viewer.py        # 可视化工具
 │   └── utils/
 │       ├── __init__.py
-│       └── math_utils.py              # 通用数学工具
-│
+│       └── math_utils.py    # 通用数学工具
+├── configs/
+│   └── default.yaml         # 默认超参数（时间步长、权重等）
 ├── scripts/
-│   ├── rm65_mpc_ilqr_5_5.py           # ★ 主脚本：MPC+iLQR 击打（后摆+退火+法向量）
-│   ├── rm65_mpc_ilqt.py               # MPC+iLQT 基线（RM-65，无后摆优化）
-│   ├── rm65_joint_viewer.py           # RM-65 关节调节查看器（位置执行器，可拖动）
-│   ├── rm65_realtime_play.py          # RM-65 实时连续击打（自动发球循环）
-│   ├── run_rm65.py                    # RM-65 雅可比转置实时控制器
-│   ├── train_ilqt.py                  # UR5e 离线 iLQT 规划（遗留）
-│   ├── train_mpc.py                   # UR5e MPC 基线脚本（遗留）
-│   └── eval_sim.py                    # UR5e 仿真评估（遗留）
-│
+│   ├── train_ilqt.py        # 主入口：运行 iLQT 优化
+│   ├── eval_sim.py          # 在 MuJoCo 仿真中评估优化轨迹
+│   └── plot_results.py      # 绘制轨迹、代价等图表
 ├── tests/
-│   ├── test_kinematics.py             # 运动学 + 模型加载测试
-│   ├── test_ball.py                   # 球轨迹 + 弹跳模型测试
-│   ├── test_linearize.py              # 解析线性化 vs 有限差分一致性测试
-│   └── test_mpc.py                    # 权重调度 + MPC 组件测试
-│
-├── docs/
-│   └── rm65_tennis_report.md          # 项目技术报告
-│
-└── assets/
-    └── rm_65/                         # RM-65 机器人资产（URDF、STL 网格）
+│   ├── test_kinematics.py
+│   ├── test_ilqt.py
+│   └── test_dynamics.py
+├── results/                 # 输出目录（日志、轨迹、视频）
+└── requirements.txt
 ```
 
 ## 核心算法说明
 
-### MPC + iLQR 闭环架构（主算法）
-主脚本 `rm65_mpc_ilqr_5_5.py` 采用 MPC 外层闭环 + iLQR 内层轨迹优化：
-```
-每 replan_interval 步重规划:
-  1. 观测球当前位置和速度（MuJoCo 物理状态）
-  2. find_hitting_point_physics → 物理仿真预测击打点
-  3. 构建代价函数 HittingCost（终端位置+速度+法向量）
-  4. 生成 Warm-start 控制序列（后摆轨迹 PD）
-  5. solve_few_iters → iLQR 优化短地平线轨迹
-  6. 执行第一个力矩指令
-  7. 下一时间步重复
-```
-
-### iLQR 求解器（`ILQTSolver`）
+### iLQT（迭代线性二次跟踪器）
 - **后向传递**: 从终端时刻到初始时刻，计算增益矩阵 K_k, k_k
-- **前向传递**: 用线搜索（alpha_list）更新轨迹和控制序列
-- **正则化**: Levenberg-Marquardt 风格（mu_min, mu_max, delta_0）
-- **两种线性化**: 解析法（`linearize_analytical`，推荐）和有限差分法（`linearize_dynamics`，备用）
-- **短地平线模式**: `solve_few_iters()` 专为 MPC 设计，只迭代 2~3 次
+- **前向传递**: 用线搜索更新轨迹和控制序列
+- **终端代价**: 惩罚末端执行器偏离期望击打点（位置 + 速度）
+- **运行代价**: 惩罚过大的控制力矩
+- 终端代价形式：
+  ```
+  l_terminal(x) = ||p_ee(x) - p_hit||^2_Q_p + ||v_ee(x) - v_hit||^2_Q_v
+  ```
+  其中 p_ee 为末端位置，p_hit 为击打点位置，v_ee 为末端速度，v_hit 为期望击打速度
+- **两阶段优化**：
+  - 阶段1：仅位置代价（Q_p×5, Q_v≈0, R×0.1），使用雅可比转矩初始控制，快速收敛到击打点附近
+  - 阶段2：完整代价（Q_p, Q_v, R），从阶段1结果热启动，精细调整末端速度
 
-### 代价函数插件架构
+### 动力学线性化
+- 通过 MuJoCo 的 `mj_jac` 和 `mj_rne` 计算雅可比和动力学偏导
+- 或使用有限差分法数值线性化（开发初期更快）
+- 线性化结果：x_{k+1} ≈ f(x_k, u_k) = A_k δx + B_k δu + ...
 
-代价函数通过 `COST_REGISTRY` 注册表 + `create_cost` 工厂实现可插拔切换。
-`mpc.yaml` 中 `cost_type` 字段指定使用哪个代价类型，对应 `configs/cost_*.yaml` 配置文件。
-
-基类层次：
-- **`BaseCost`** — 抽象根类，定义 4 个核心方法（`running_cost`, `terminal_cost`, `running_derivatives`, `terminal_derivatives`）和 4 个 no-op mutation 方法（`update_weights`, `update_target`, `set_R_schedule`, `set_q_des_traj`）。
-- **`EndEffectorCost`** — 中间基类，持有 env + 维度常量，提供 `_compute_h` / `_compute_n` / `_compute_jacobian_h` / `_compute_jacobian_n` 工具方法。末端执行器相关的代价函数继承此类。
-
-新增代价类型只需：新建 `costs/xxx.py`（继承 `BaseCost` 或 `EndEffectorCost`） + 新建 `configs/cost_xxx.yaml` + 在 `COST_REGISTRY` 加一行。
-
-### 代价函数（`HittingCost`）
-```
-终端代价:
-  J_terminal = ||p_ee - p_hit||²_Q_p + ||v_ee - v_des||²_Q_v + Q_n·||n - n_des||²
-
-运行代价:
-  J_running = Σ_k [ R_schedule_k · ||u_k||² + Q_p_running · ||p_ee - p_ball||²
-                    + Σ_j Q_joint_j · (q_j - q_des_j)² ]
-
-其中:
-  - Q_n, n_des: 终端拍面法向量代价（默认 0 = 禁用）
-  - R_schedule: 时变 R（退火调度，接近击打时衰减到零）
-  - Q_joint: 关节空间跟踪（保护后摆方向不被优化器洗掉）
-  - Q_p_running: 运行位置代价（跟踪球位置）
-```
-
-### 后摆 Warm-start
-主脚本生成后摆→前挥初始控制序列，分两段：
-- **后摆段**（前 bs_ratio 比例）：关节1 向后旋转 backswing 弧度
-- **前挥段**（剩余比例）：PD 控制追踪击打点方向
-- 效果：为 iLQR 提供物理合理的初始猜测，避免陷入局部最优
-
-### R 退火调度
-`R_schedule` 在接近击打时刻线性衰减到零：
-- 前段高 R → 抑制力矩，轨迹平滑
-- 后段低 R → 允许爆发力矩，精确击打
-- `r_decay` 参数控制退火占比
-
-### 拍面法向量约束
-终端代价中加入拍面法向量惩罚：
-- `Q_n` 权重控制法向量偏离惩罚强度
-- `n_des` 为期望法向量方向
-- `--normal-flip` 参数可翻转法向量方向
-
-### 击打点搜索
-两种实现：
-1. **解析模型**（`find_hitting_point`）：抛物线公式 + 可选弹跳模型
-2. **物理仿真**（`find_hitting_point_physics`，推荐）：使用 MuJoCo 物理引擎前向仿真球运动（含地面弹跳），逐帧打分筛选最佳击打时刻
-
-评分函数：`score = 距离 + 高度惩罚 − 前方优先`
-
-### 网球轨迹预测（`ball.py`）
-- 基本抛物线：`p(t) = p0 + v0*t + 0.5*g*t²`
-- 含弹跳模型：解析计算弹跳时刻，弹起后 Z 速度反转×恢复系数
-- 发球生成：`generate_hittable_ball`、`generate_serve_ball`、`generate_ball_to_target_box`
+### 网球轨迹预测
+- 假设网球在重力作用下做抛物线运动（忽略空气阻力）
+- 给定球的初始位置和速度，预测球在任意时刻的位置
+- 计算击打时刻和击打点：球到达球拍可及范围内的时间点
 
 ## 构建与运行命令
-
-### 环境配置
-```bash
-# 创建独立 conda 环境（推荐）
-conda create -n mujoco_tennis python=3.11
-conda activate mujoco_tennis
-pip install -r requirements.txt
-
-# 或直接 pip 安装
-pip install -r requirements.txt
-```
-
-依赖：`mujoco>=3.0`, `numpy>=1.24`, `scipy>=1.10`, `matplotlib>=3.7`, `pyyaml>=6.0`,
-`pytest>=7.0`, `ruff>=0.1`, `mypy>=1.5`
-
-### 运行命令
-
-#### 主脚本（RM-65 MPC+iLQR）
-```bash
-# 默认参数运行
-python scripts/rm65_mpc_ilqr_5_5.py
-
-# 带可视化回放
-python scripts/rm65_mpc_ilqr_5_5.py --viewer
-
-# 指定随机种子
-python scripts/rm65_mpc_ilqr_5_5.py --seed 42 --viewer
-
-# 调整后摆 + R 退火
-python scripts/rm65_mpc_ilqr_5_5.py --seed 42 --r-decay 0.8 --bs-ratio 0.1 --viewer
-
-# 调整拍面法向量约束
-python scripts/rm65_mpc_ilqr_5_5.py --seed 42 --normal-weight 100000 --viewer
-```
-
-#### 其他脚本
-```bash
-# RM-65 关节调节查看器（拖动滑条直接控制关节）
-python scripts/rm65_joint_viewer.py
-
-# RM-65 实时连续击打
-python scripts/rm65_realtime_play.py --interval 3.0
-
-# UR5e 离线 iLQT 优化（遗留）
-python scripts/train_ilqt.py --viewer
-```
-
-#### 开发命令
-```bash
-# 运行测试
-pytest tests/
-
-# 代码检查
-ruff check src/ tests/ scripts/
-
-# 类型检查
-mypy src/
-```
+- 安装依赖: `pip install -r requirements.txt`
+- 运行 iLQT 优化: `python scripts/train_ilqt.py`
+- 仿真评估: `python scripts/eval_sim.py`
+- 运行测试: `pytest tests/`
+- 代码检查: `ruff check src/ tests/ scripts/`
+- 类型检查: `mypy src/`
 
 ## 编码规范
 - 所有代码注释、docstring 使用**中文**
 - 使用 `numpy` 进行数组运算，禁止对数组使用原生 Python 循环
-- RM-65 模型定义在 `src/robot/rm65_model.xml`，是 DOF 数、关节名和 ctrlrange 的唯一事实来源
-- UR5e 模型定义在 `src/robot/model.xml`（遗留）
+- MuJoCo 模型定义在 `src/robot/model.xml`，是 DOF 数和关节顺序的唯一事实来源
 - 可调参数放在 `configs/*.yaml` 中，不要硬编码
 - 日志使用 Python `logging` 模块，不要用 `print`
 - 测试文件与 `src/` 结构对应，放在 `tests/` 下
@@ -297,28 +135,50 @@ mypy src/
 - 文件路径使用 `pathlib.Path`，不要拼接字符串
 
 ## MuJoCo 关键注意事项
-- **`range` 属性使用角度（degrees）**：MuJoCo 3.8+ 的 `range` 属性以度为单位，
-  会自动转换为弧度。例如 `range="-178 178"` 对应约 ±3.11 rad
-- **`ctrlrange` 与力矩裁剪**：`RM65Env.step()` 中使用 `model.actuator_ctrlrange` 裁剪控制
-- **碰撞位掩码**：RM-65 模型使用位掩码分级碰撞，不要随意修改 contype/conaffinity
-- **积分器**：`rm65_model.xml` 使用 `integrator="implicitfast"`，提高大扭矩下的仿真稳定性
-- **球拍-球碰撞**：`<pair>` 指定 `condim="1"`（仅法向力）+ `solref="-5000 0"`（高刚度零阻尼）
-  实现近弹性碰撞
-- **相邻臂段排除**：`<contact><exclude>` 排除共享关节的相邻连杆碰撞
-- **球弹跳**：`RM65Env._handle_ball_bounce()` 在 MuJoCo 步后解析处理球触地弹跳
+- **`range` 属性使用角度（degrees）**：MuJoCo 3.8+ 的 `range` 属性以度为单位，会自动转换为弧度。例如 `range="-180 180"` 对应 ±π，而非 `range="-3.14 3.14"`（后者仅给出 ±3.14°）
+- **`ctrlrange` 与力矩裁剪**：前向传递和 `env.step()` 中必须使用 `model.actuator_ctrlrange` 裁剪控制，不要硬编码 ±100
+- **自碰撞**：手臂和躯干的 geom 需设置 `contype="0" conaffinity="0"` 以避免碰撞约束阻止运动
+- **积分器**：使用 `integrator="implicitfast"` 可提高大扭矩下的仿真稳定性
 
 ## 优化策略
+- **两阶段 iLQT**：阶段1 仅位置代价（高权重 Q_p），快速到达击打点；阶段2 完整代价（位置+速度），热启动精细调整
+- **雅可比转置初始控制**：使用 `J^T * (p_hit - p_ee)` 生成初始控制序列，比常数力矩初始猜测效果好得多
+- **控制范围**：肩关节 ±300~500 Nm，肘关节 ±200 Nm，腕关节 ±50 Nm
 
-### MPC 分层策略
-- **远距**（球距击打点远）：雅可比转置开环控制，快速接近
-- **中距**：iLQR 单次迭代（max_iter=1），轻量修正
-- **近距**：iLQR 多次迭代（max_iter=2~3），精细优化
+## 核心算法框架：MPC + iLQR + Tube
 
-### 后摆 + R 退火 + 法向量（rm65_mpc_ilqr_5_5.py 独有）
-- **后摆 Warm-start**: 关节1 先向后摆动再前挥，生成物理合理的初始轨迹
-- **R 退火**: 控制代价权重在接近击打时刻衰减，允许爆发力矩
-- **法向量约束**: 终端代价惩罚拍面朝向偏离，确保击打方向正确
+本项目的核心算法实现在以下脚本中：
 
-### 遗留策略（train_ilqt.py）
-- **两阶段 iLQT**：阶段1 仅位置代价（高 Q_p），快速到达击打点；阶段2 完整代价（位置+速度），热启动精细调整
-- **雅可比转置初始控制**：`J^T * (p_hit - p_ee)` 生成初始控制序列
+- **`scripts/rm65_mpc_tube_constraint.py`** — 离线仿真主脚本（MPC+iLQR+Tube+硬约束）
+- **`scripts/rm65_mpc_tube_constraint_realtime.py`** — 实时仿真（异步重规划+buffer机制）
+- **`scripts/run_tcp_limit_experiment.py`** — TCP限速实验（monkey-patch安全滤波器）
+
+### Tube-based Robust Hitting
+- 不确定性管道：σ(t) = σ₀ + σᵥ·t + σₐ·t²
+- 候选击球窗口：以 best_k 为中心，window_half_ms 为半宽
+- 空间走廊式代价（不绑定时间-空间对应）：
+  1. 垂直偏离代价（hinge loss）
+  2. 速度方向代价（球拍沿球轨迹线方向运动）
+  3. 法向量代价（拍面朝向来球方向）
+
+### 多层安全滤波
+- 关节约束：位置/速度/加速度/力矩四重限制
+- TCP 速度硬限制
+- X 平面墙：臂不越过身体中线
+- 逐步安全滤波：β = [1.0, 0.8, 0.6, 0.4, 0.2, 0.0]
+
+## 论文撰写 Skill
+
+项目包含 4 个论文撰写相关的 Skill，位于 `skills/` 目录：
+
+| Skill | 文件 | 用途 |
+|-------|------|------|
+| 实验设计与数据管理 | `skills/experiment_design.md` | 设计实验矩阵、运行批量实验、管理数据 |
+| 论文图表生成 | `skills/figure_generation.md` | 生成 IEEE 级别的出版质量图表 |
+| 论文撰写 | `skills/paper_writing.md` | IEEE RAL 论文结构、中文草稿、翻译流程 |
+| 审稿与迭代 | `skills/paper_review.md` | 自审检查清单、审稿报告、迭代改进 |
+
+### 实验数据目录
+- 所有实验数据存放在 `experiment_data/` 目录
+- 按 `exp1~exp6` 编号组织，每组含 `config.yaml` + `results.csv` + `raw/`
+- 详见 `experiment_data/README.md`

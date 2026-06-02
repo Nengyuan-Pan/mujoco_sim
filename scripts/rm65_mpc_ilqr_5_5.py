@@ -817,6 +817,38 @@ def visualize_rm65_result(
         viewer.cam.azimuth = cam_azimuth
         viewer.cam.lookat[:] = [0.0, 0.0, 1.0]
 
+        # 多灯布光（天光+主光+补光+背光+球灯）
+        # 0: 天光 - 正上方模拟天空漫射
+        model.light_pos[0] = [0.0, 0.0, 8.0]
+        model.light_dir[0] = [0.0, 0.0, -1.0]
+        model.light_diffuse[0] = [1.4, 1.45, 1.55]
+        model.light_ambient[0] = [0.3, 0.3, 0.35]
+        model.light_specular[0] = [0.5, 0.5, 0.5]
+        # 1: 主光 - 右上方暖白
+        if model.nlight > 1:
+            model.light_pos[1] = [2.0, -2.0, 3.0]
+            model.light_dir[1] = [-0.4, 0.3, -0.8]
+            model.light_diffuse[1] = [1.2, 1.15, 1.05]
+            model.light_ambient[1] = [0.0, 0.0, 0.0]
+            model.light_specular[1] = [0.6, 0.6, 0.6]
+            model.light_active[1] = True
+        # 2: 补光 - 左前方冷白
+        if model.nlight > 2:
+            model.light_pos[2] = [-1.5, -1.0, 2.5]
+            model.light_dir[2] = [0.3, 0.2, -0.7]
+            model.light_diffuse[2] = [0.8, 0.85, 0.95]
+            model.light_ambient[2] = [0.0, 0.0, 0.0]
+            model.light_specular[2] = [0.4, 0.4, 0.4]
+            model.light_active[2] = True
+        # 3: 背光 - 后方轮廓
+        if model.nlight > 3:
+            model.light_pos[3] = [0.0, 2.0, 2.0]
+            model.light_dir[3] = [0.0, -0.5, -0.6]
+            model.light_diffuse[3] = [0.5, 0.5, 0.55]
+            model.light_ambient[3] = [0.0, 0.0, 0.0]
+            model.light_specular[3] = [0.3, 0.3, 0.3]
+            model.light_active[3] = True
+
         start_time = time.perf_counter()
 
         while viewer.is_running():
@@ -1196,7 +1228,7 @@ def main() -> None:
                     iters_plan = 50
                     is_first_plan = False
                 elif k_hit_new <= near_threshold:
-                    iters_plan = 15
+                    iters_plan = 8
 
                 if use_backswing:
                     q_hit_new_ik = env.solve_ik(

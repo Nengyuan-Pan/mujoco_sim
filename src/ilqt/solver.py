@@ -4,7 +4,8 @@ import logging
 import numpy as np
 from src.sim.env import MujocoEnv
 from src.dynamics.linearize import linearize_trajectory, linearize_analytical_trajectory
-from src.ilqt.costs.base import BaseCost
+from src.ilqt.cost import HittingCost
+from src.ilqt.robot_limits import RobotLimits
 from src.ilqt.utils import (
     compute_total_cost,
     forward_pass_with_linesearch,
@@ -53,9 +54,10 @@ class ILQTSolver:
     def solve(
         self,
         env: MujocoEnv,
-        cost_fn: BaseCost,
+        cost_fn: HittingCost,
         x0: np.ndarray,
         U_init: np.ndarray | None = None,
+        limits: RobotLimits | None = None,
     ) -> tuple[np.ndarray, np.ndarray, list[float]]:
         """运行 iLQT 优化。
 
@@ -64,6 +66,7 @@ class ILQTSolver:
             cost_fn: 代价函数实例。
             x0: 初始臂状态，形状 (12,)。
             U_init: 初始控制序列，形状 (N, 6)。若为 None 则用零初始化。
+            limits: 真实机器人硬约束参数。None 表示不启用。
 
         Returns:
             (X_opt, U_opt, cost_history): 最优轨迹、最优控制、代价历史。
@@ -104,7 +107,8 @@ class ILQTSolver:
             Ks, ks = result
 
             X_new, U_new, cost_new, accepted = forward_pass_with_linesearch(
-                env, cost_fn, X, U, Ks, ks, self.alpha_list, cost_old
+                env, cost_fn, X, U, Ks, ks, self.alpha_list, cost_old,
+                limits=limits,
             )
 
             if accepted:
@@ -139,12 +143,14 @@ class ILQTSolver:
     def solve_few_iters(
         self,
         env: MujocoEnv,
-        cost_fn: BaseCost,
+        cost_fn: HittingCost,
         x0: np.ndarray,
         U_init: np.ndarray,
         max_iter: int = 3,
         skip_linesearch: bool = True,
-    ) -> tuple[np.ndarray, np.ndarray, list[float]]:
+        limits: RobotLimits | None = None,
+        use_fast_lin: bool = False,
+    ) -> tuple[np.ndarray, np.ndarray, list[float], bool]:
         """运行指定次数的 iLQT 迭代（用于 MPC 实时规划）。
 
         Args:
@@ -154,9 +160,12 @@ class ILQTSolver:
             U_init: 初始控制序列，形状 (N, 6)。
             max_iter: 最大迭代次数。
             skip_linesearch: 是否跳过线搜索（MPC 模式默认 True）。
+            limits: 真实机器人硬约束参数。None 表示不启用。
+            use_fast_lin: 是否使用快速线性化（跳过 ∂h/∂q, ∂h/∂qdot）。
 
         Returns:
-            (X_opt, U_opt, cost_history): 轨迹、控制、代价历史。
+            (X_opt, U_opt, cost_history, success):
+              success=False 表示硬约束饱和，所有迭代 forward pass 均被拒绝。
         """
         U = U_init.copy()
         X = self._rollout(env, x0, U)
@@ -164,9 +173,15 @@ class ILQTSolver:
         cost_history: list[float] = [cost_old]
 
         mu = self.mu_init
+        rejection_streak: int = 0
+        max_rejection_streak: int = 3
+        solver_success: bool = True
 
         for iteration in range(max_iter):
-            As, Bs, fs = self._linearize(env, X, U)
+            if use_fast_lin:
+                As, Bs, fs = self._linearize_fast(env, X, U)
+            else:
+                As, Bs, fs = self._linearize(env, X, U)
 
             l_xs, l_us, l_xxs, l_uxs, l_uus = self._running_cost_derivatives(
                 cost_fn, X, U
@@ -184,11 +199,32 @@ class ILQTSolver:
             Ks, ks = result
 
             if skip_linesearch:
-                X_new, U_new, cost_new = forward_pass_single(
-                    env, cost_fn, X, U, Ks, ks, alpha=0.5
+                X_new, U_new, cost_new, reject_reason = forward_pass_single(
+                    env, cost_fn, X, U, Ks, ks, alpha=0.5,
+                    limits=limits,
                 )
+                if X_new is None:
+                    # 所有 alpha 被硬约束拒绝
+                    rejection_streak += 1
+                    mu = min(mu * self.delta_0, self.mu_max)
+                    cost_history.append(cost_old)
+                    logger.warning(
+                        "迭代 %d: forward pass 硬约束拒绝 (%s), "
+                        "rejection_streak=%d, mu=%.2e",
+                        iteration, reject_reason, rejection_streak, mu,
+                    )
+                    if rejection_streak >= max_rejection_streak:
+                        solver_success = False
+                        logger.warning(
+                            "迭代 %d: 连续 %d 次硬约束拒绝，求解失败",
+                            iteration, rejection_streak,
+                        )
+                        break
+                    continue
+                else:
+                    rejection_streak = 0
+
                 # MPC 模式：始终接受更新，依赖重规划纠错
-                # 不检查代价，省去 cost 比较开销
                 if np.isfinite(X_new[-1]).all():
                     X = X_new
                     U = U_new
@@ -199,7 +235,8 @@ class ILQTSolver:
                     cost_history.append(cost_old)
             else:
                 X_new, U_new, cost_new, accepted = forward_pass_with_linesearch(
-                    env, cost_fn, X, U, Ks, ks, self.alpha_list, cost_old
+                    env, cost_fn, X, U, Ks, ks, self.alpha_list, cost_old,
+                    limits=limits,
                 )
 
                 if accepted:
@@ -208,13 +245,19 @@ class ILQTSolver:
                     mu = max(mu / self.delta_0, self.mu_min)
                     cost_old = cost_new
                     cost_history.append(cost_old)
+                    rejection_streak = 0
                 else:
+                    rejection_streak += 1
                     mu = min(mu * self.delta_0, self.mu_max)
                     cost_history.append(cost_old)
+                    if rejection_streak >= max_rejection_streak:
+                        solver_success = False
+                        break
                     if mu >= self.mu_max:
+                        solver_success = False
                         break
 
-        return X, U, cost_history
+        return X, U, cost_history, solver_success
 
     def _rollout(
         self, env: MujocoEnv, x0: np.ndarray, U: np.ndarray
@@ -234,12 +277,14 @@ class ILQTSolver:
         return X
 
     def _running_cost_derivatives(
-        self, cost_fn: BaseCost, X: np.ndarray, U: np.ndarray
+        self, cost_fn: HittingCost, X: np.ndarray, U: np.ndarray
     ) -> tuple[list, list, list, list, list]:
         """计算所有时间步的运行代价导数。"""
         N = len(U)
         l_xs, l_us, l_xxs, l_uxs, l_uus = [], [], [], [], []
         for k in range(N):
+            if k > 0 and hasattr(cost_fn, 'set_u_prev'):
+                cost_fn.set_u_prev(U[k - 1])
             lx, lu, lxx, lux, luu = cost_fn.running_derivatives(X[k], U[k], k)
             l_xs.append(lx)
             l_us.append(lu)
@@ -247,6 +292,13 @@ class ILQTSolver:
             l_uxs.append(lux)
             l_uus.append(luu)
         return l_xs, l_us, l_xxs, l_uxs, l_uus
+
+    def _linearize_fast(
+        self, env: MujocoEnv, X: np.ndarray, U: np.ndarray
+    ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
+        """快速线性化（仅 M^{-1}，跳过 ∂h/∂q, ∂h/∂qdot 有限差分）。"""
+        from src.dynamics.linearize import linearize_fast_trajectory
+        return linearize_fast_trajectory(env, X, U)
 
     def _backward_pass(
         self,

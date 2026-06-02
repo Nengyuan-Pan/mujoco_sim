@@ -110,7 +110,7 @@ class TestSolverFewIters:
         solver = ILQTSolver(ilqt_cfg)
 
         U_init = np.zeros((20, 6))
-        X, U, cost_history = solver.solve_few_iters(
+        X, U, cost_history, success = solver.solve_few_iters(
             env, cost_fn, x0, U_init, max_iter=3,
         )
 

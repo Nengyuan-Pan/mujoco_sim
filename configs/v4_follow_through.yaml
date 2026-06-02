@@ -1,0 +1,27 @@
+# v4 配置：随挥管道（Follow-Through Tube）
+# 改动：racket_speed=1.8（匹配TCP限制）+ 随挥管道引导匀减速
+# 继承 default.yaml，仅覆盖需要修改的字段
+
+hitting:
+  racket_speed: 1.8              # 匹配 TCP 硬限制
+  hit_direction: [0.0, -1.0, 0.3]
+  workspace_radius: 0.85
+  shoulder_pos: [0.0, -0.12, 1.163]
+  hit_offset_x_range: [0.10, 0.40]
+  hit_offset_y_range: [-0.25, 0.25]
+  hit_offset_z_range: [-0.15, 0.30]
+  # 随挥管道参数
+  follow_through_length: 0.4    # 随挥距离 (m)：终端点在击球点前方多远
+  follow_through_steps: 40      # 随挥步数 (40*5ms=200ms)
+  follow_through_v_terminal: 0.3  # 终端期望速度 (m/s)
+
+cost:
+  Q_p: [50000.0, 50000.0, 50000.0]
+  Q_v: [200.0, 200.0, 200.0]
+  R: 0.0001
+  Q_qdot: 0.001
+  Q_qddot: 0.0005
+  Q_du: 0.001
+  # 随挥管道代价权重
+  Q_p_follow: 50000.0           # 随挥管道位置代价
+  Q_v_follow: 200.0             # 随挥管道速度代价

@@ -11,3 +11,9 @@ venv/
 
 results/
 videos/
+build/
+experiment_data/
+figures/
+paper/
+*.mp4
+*.avi
