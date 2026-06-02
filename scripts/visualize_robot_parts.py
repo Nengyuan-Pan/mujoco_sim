@@ -26,6 +26,8 @@ import mujoco.viewer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.utils.mujoco_loader import load_mujoco_model
+
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
@@ -169,7 +171,7 @@ def main() -> None:
 
     # 加载模型
     model_path = Path(__file__).resolve().parent.parent / "src" / "robot" / "rm65_model.xml"
-    model = mujoco.MjModel.from_xml_path(str(model_path))
+    model = load_mujoco_model(model_path)
     data = mujoco.MjData(model)
 
     # 设置初始关节角度（右臂 + 左臂）

@@ -20,6 +20,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.utils.mujoco_loader import load_mujoco_model
 import mujoco
 
 # 需要监控的臂体
@@ -371,7 +372,7 @@ def main() -> None:
     args = parser.parse_args()
 
     model_path = Path(__file__).resolve().parent.parent / "src" / "robot" / "rm65_model.xml"
-    model = mujoco.MjModel.from_xml_path(str(model_path))
+    model = load_mujoco_model(model_path)
     data = mujoco.MjData(model)
 
     # 获取 body IDs

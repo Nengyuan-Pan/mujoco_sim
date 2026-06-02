@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import numpy as np
 import mujoco
 import mujoco.viewer
+from src.utils.mujoco_loader import load_mujoco_model
 
 
 INIT_Q_RIGHT = np.array([0.373, 1.57, -0.236, 0.404, 0.446, 2.45], dtype=np.float64)
@@ -64,7 +65,7 @@ def build_position_actuator_model() -> tuple[mujoco.MjModel, Path]:
     tmp_path = model_path.parent / "_rm65_position_actuator_tmp.xml"
     tmp_path.write_text(new_xml, encoding="utf-8")
 
-    model = mujoco.MjModel.from_xml_path(str(tmp_path))
+    model = load_mujoco_model(tmp_path)
     return model, tmp_path
 
 

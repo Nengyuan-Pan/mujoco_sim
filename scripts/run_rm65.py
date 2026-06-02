@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.utils.mujoco_loader import load_mujoco_model
 import mujoco
 import mujoco.viewer
 import numpy as np
@@ -69,7 +70,7 @@ def main() -> None:
         print(f"模型文件不存在: {model_path}")
         sys.exit(1)
 
-    model = mujoco.MjModel.from_xml_path(str(model_path))
+    model = load_mujoco_model(model_path)
     data = mujoco.MjData(model)
 
     racket_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "racket_center")
