@@ -17,3 +17,5 @@ figures/
 paper/
 *.mp4
 *.avi
+
+.opencode/
