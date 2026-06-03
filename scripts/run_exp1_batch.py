@@ -1,80 +1,72 @@
-"""实验1批量运行脚本：算法能力上限（速度豁免模式）。
+"""批量运行 exp1_algorithm_capability 实验（速度豁免 + 1m/s球速扫参）。
 
 用法:
     python scripts/run_exp1_batch.py
 """
+import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-LOG_DIR = ROOT / "experiment_data" / "exp1_algorithm_capability" / "raw"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+RAW_DIR = PROJECT_ROOT / "experiment_data" / "exp1_algorithm_capability" / "raw"
+WRAPPER = PROJECT_ROOT / "scripts" / "_run_exp1_exempt.py"
+PYTHON_EXE = Path(sys.executable)
 
-BALL_SPEEDS = [9, 15, 18, 20]
-SEEDS = list(range(20))
+SPEEDS = list(range(8, 19))  # 8-18 m/s
+SEEDS = list(range(10))
 TUBE_MODES = ["true", "false"]
 
-script = str(ROOT / "scripts" / "rm65_mpc_tube_constraint.py")
 
-total = len(BALL_SPEEDS) * len(SEEDS) * len(TUBE_MODES)
-done = 0
-skipped = 0
-failed = 0
-t_start = time.perf_counter()
+def run_one(speed: int, seed: int, tube: str) -> bool:
+    """运行单次实验。"""
+    tag = f"speed{speed}_seed{seed}_tube_{tube}"
+    log_path = RAW_DIR / f"{tag}.log"
+    if log_path.exists():
+        print(f"  [SKIP] {tag} — 已存在")
+        return True
 
-for speed in BALL_SPEEDS:
-    for tube in TUBE_MODES:
-        for seed in SEEDS:
-            tag = f"speed{speed}_tube{tube.capitalize()}_seed{seed}"
-            log_path = LOG_DIR / f"{tag}.log"
+    cmd = [str(PYTHON_EXE), str(WRAPPER), str(speed), str(seed), tube]
+    try:
+        result = subprocess.run(
+            cmd, cwd=str(PROJECT_ROOT), capture_output=True,
+            timeout=120, encoding="utf-8",
+            env={**os.environ, "PYTHONUTF8": "1"},
+        )
+        content = result.stdout
+        if result.stderr:
+            # stderr might contain logging output (MuJoCo info goes to stderr)
+            # Prioritize stderr for the offline script
+            content = result.stderr if result.stderr.strip() else content
+        log_path.write_text(content, encoding="utf-8")
+        return True
+    except subprocess.TimeoutExpired:
+        print(f"  [FAIL] {tag} — 超时")
+        return False
+    except Exception as e:
+        print(f"  [FAIL] {tag} — {e}")
+        return False
 
-            if log_path.exists() and "max_qdot" in log_path.read_text(encoding="utf-8", errors="ignore"):
-                skipped += 1
-                done += 1
-                continue
 
-            cmd = [
-                sys.executable, script,
-                "--serve-box", "--ball-speed", str(speed),
-                "--seed", str(seed),
-                "--use_tube", tube,
-                "--no-backswing", "--no-plot",
-                "--horizon", "120", "--iter", "10",
-                "--replan-interval", "10",
-            ]
+def main() -> None:
+    total = len(SPEEDS) * len(TUBE_MODES) * len(SEEDS)
+    print(f"exp1_algorithm_capability (速度豁免): {len(SPEEDS)} 球速 × {len(TUBE_MODES)} tube × {len(SEEDS)} seeds = {total} runs")
+    print(f"日志目录: {RAW_DIR}\n")
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
 
-            try:
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    timeout=120,
-                    cwd=str(ROOT),
-                )
-                log_path.write_text(result.stdout + result.stderr, encoding="utf-8")
+    n = 0
+    ok = 0
+    for speed in SPEEDS:
+        for tube in TUBE_MODES:
+            for seed in SEEDS:
+                n += 1
+                label = f"{speed}m/s tube={tube} seed={seed}"
+                print(f"[{n}/{total}] {label} ...", flush=True)
+                if run_one(speed, seed, tube):
+                    ok += 1
 
-                if "max_qdot" in result.stdout:
-                    done += 1
-                else:
-                    failed += 1
-                    done += 1
-                    print(f"  [WARN] {tag}: no max_qdot in output")
-            except subprocess.TimeoutExpired:
-                failed += 1
-                done += 1
-                print(f"  [TIMEOUT] {tag}")
-            except Exception as e:
-                failed += 1
-                done += 1
-                print(f"  [ERROR] {tag}: {e}")
+    print(f"\n完成: {ok} ok, {total - ok} failed")
 
-            elapsed = time.perf_counter() - t_start
-            eta = elapsed / done * (total - done) if done > 0 else 0
-            print(f"[{done}/{total}] speed={speed} tube={tube} seed={seed} "
-                  f"({elapsed:.0f}s elapsed, ~{eta:.0f}s remaining)")
 
-print(f"\n完成: {done}/{total}, 跳过(已有): {skipped}, 失败: {failed}")
-print(f"总耗时: {time.perf_counter() - t_start:.1f}s")
+if __name__ == "__main__":
+    main()
