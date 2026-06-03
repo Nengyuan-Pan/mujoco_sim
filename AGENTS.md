@@ -262,6 +262,56 @@ mujoco_sim/
 - 代码检查: `ruff check src/ tests/ scripts/`
 - 类型检查: `mypy src/`
 
+## 批量实验架构
+
+新增实验不再需要手动写 PowerShell 循环、处理编码问题、逐个提取结果。
+已有标准化的三层模板，复制参考文件后只改 3 个参数。
+
+### 三层架构
+
+| 层 | 文件模板 | 职责 | 改什么 |
+|----|---------|------|--------|
+| 包装 | `scripts/_run_expX_*.py` | monkey-patch 约束 → 构建 sys.argv → 调主脚本 | 约束参数、独有 CLI flag（如 `--no-bounce`） |
+| 运行 | `scripts/run_expX_batch.py` | 遍历参数矩阵 → subprocess → UTF-8 日志 | `SPEEDS`、`SEEDS`、`TUBE_MODES` 三个列表 |
+| 提取 | `scripts/extract_expX_results.py` | regex 解析日志 → results.csv + 命中率汇总 | 离线/实时格式选择、额外指标 regex |
+
+### 参考实现（复制即改）
+
+| 实验类型 | 包装参考 | 运行参考 | 提取参考 |
+|---------|---------|---------|---------|
+| 豁免约束 + 离线 | `_run_exp1_v3_exempt.py` | `run_exp1_v3_batch.py` | `extract_exp1_v3_results.py` |
+| 严格约束 + 离线 | `_run_exp1_exempt.py`（改 margin→1.0） | `run_exp2_v2_batch.py` | `extract_exp2_v2_results.py` |
+| 实时脚本（有 `__RESULT__`） | 不需要 | `run_exp1_batch.py` | `extract_exp2_results.py` |
+
+### 新建实验只需 3 步
+
+1. **建目录**：`experiment_data/expN_<name>/raw/` + `config.yaml`
+2. **复制包装**：从参考中选一个 `_run_expX_*.py`，改 `constraints` 和 `sys.argv` 中的独有 flag
+3. **改运行器**：复制 `run_expX_v3_batch.py`，改 `SPEEDS`、`SEEDS`、`TUBE_MODES` 三个列表
+
+提取脚本通常无需改动，直接复用对应格式的版本。
+
+### 已验证的效率
+
+| 指标 | 手动模式 | 批量模式 |
+|------|---------|---------|
+| 单次运行 | `python script.py args > log` | 自动 subprocess |
+| 多参循环 | PowerShell 手写嵌套循环 | 改一行列表 |
+| 日志编码 | Tee-Object 产生 UTF-16LE 乱码 | 统一 UTF-8 |
+| 并行加速 | 不支持 | `--workers 4`，540 runs 135min→15.6min |
+| 断点续传 | 手工跳过已跑组合 | `log_path.exists()` 自动跳过 |
+| 结果提取 | 手动 grep + Excel | 一条命令输出 CSV |
+| 3 次实验总计 | 预估 6+ 小时手工作业 | **实际 2 小时全自动** |
+
+### 常见坑
+
+| 坑 | 现象 | 原因 | 解决 |
+|----|------|------|------|
+| UTF-16LE 日志 | regex 匹配不到中文 | PowerShell `Tee-Object` 默认编码 | 用 Python `subprocess` + `encoding="utf-8"` |
+| 离线脚本无 `__RESULT__` | 提取脚本报 KeyError | 离线脚本只输出 step log | 用离线专用提取脚本（解析 `球拍击球!` 行） |
+| monkey-patch 不生效 | 约束未改变 | import 顺序错误 | patch 必须在 `import main_mod` **之前** |
+| 并行跑崩 | MuJoCo segfault | 多进程共享 GL context | 确保 `--no-plot` 关掉所有渲染 |
+
 ## 编码规范
 - **所有代码注释、docstring 使用中文**
 - 使用 `numpy` 进行数组运算，禁止对数组使用原生 Python 循环
