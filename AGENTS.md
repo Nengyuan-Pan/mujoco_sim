@@ -136,25 +136,18 @@ mujoco_sim/
 │   ├── v4_follow_through.yaml         # V4 随挥策略配置
 │   └── v5_active_hit.yaml             # V5 主动击球配置
 ├── scripts/
-│   ├── rm65_mpc_tube_constraint.py                    # 离线仿真主脚本（MPC+iLQR+Tube+硬约束）
-│   ├── rm65_mpc_tube_constraint_realtime.py           # 实时仿真 v1（异步重规划）
-│   ├── rm65_mpc_tube_constraint_realtime_v2.py        # 实时仿真 v2
-│   ├── rm65_mpc_tube_constraint_realtime_v4.py        # 实时仿真 v4
-│   ├── rm65_mpc_tube_constraint_realtime_v5.py        # ★ 当前活跃版本（主动击球+随挥+Tube+安全滤波）
-│   ├── run_tcp_limit_experiment.py                    # TCP 限速实验
-│   ├── rm65_mpc_ilqt.py                               # 简化 MPC+iLQR
-│   ├── rm65_mpc_fast.py                               # 快速模式
-│   ├── rm65_constrained_fast.py                       # 约束快速模式
-│   ├── train_ilqt.py                                  # 离线 iLQT 训练入口
-│   ├── eval_sim.py                                    # MuJoCo 仿真评估
-│   ├── rm65_joint_viewer.py                           # 关节调节查看器（position 执行器）
-│   ├── run_rm65.py                                    # 基础运行脚本
-│   ├── visualize_robot_parts.py                       # 机器人部位可视化
-│   ├── scan_joint_safety.py                           # 关节安全范围扫描
-│   ├── run_experiments.py                             # 批量实验入口
-│   ├── run_exp1_batch.py / run_v3_experiments.py      # 实验批量脚本
-│   ├── plot_v3_results.py / plot_exp_*.py             # 结果绘图脚本
-│   └── test_*.py / run_*.py / sweep_*.py              # 测试 & 参数扫描脚本
+│   ├── rm65_mpc_tube_constraint.py               # 离线仿真（根，被 exp/ 包装 import）
+│   ├── rm65_mpc_tube_constraint_realtime.py      # 实时 v1（根）
+│   ├── rm65_mpc_tube_constraint_realtime_v2.py   # 实时 v2（根）
+│   ├── rm65_mpc_tube.py / rm65_mpc_ilqr_5_5.py  # Tube/iLQR 基线（根）
+│   ├── rm65_evaluate.py                          # 评估脚本（根）
+│   ├── sim/            # 独立仿真 13 个（v4/v5/fast/ilqt/train）
+│   ├── exp/            # 实验设施 25 个（包装·批量·运行器·提取）
+│   ├── extract/        # 结果提取 4 个（日志→CSV）
+│   ├── plot/           # 论文图表 6 个
+│   ├── tools/          # 独立工具 7 个（查看器·扫描·可视化）
+│   ├── test/           # 快速验证 9 个
+│   └── README.md       # 完整清单与说明
 ├── tests/
 │   ├── test_kinematics.py
 │   ├── test_linearize.py

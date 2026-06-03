@@ -26,32 +26,32 @@ pip install -r requirements.txt
 
 ```bash
 # 默认参数运行（随机发球）
-python scripts/rm65_mpc_tube_constraint_realtime_v5.py --viewer
+python scripts/sim/rm65_mpc_tube_constraint_realtime_v5.py --viewer
 
 # 使用长方体发球区 + 指定球速
-python scripts/rm65_mpc_tube_constraint_realtime_v5.py --serve-box --ball-speed 12 --viewer
-python scripts/rm65_mpc_tube_constraint_realtime_v5.py --serve-box --ball-speed 15 --viewer
+python scripts/sim/rm65_mpc_tube_constraint_realtime_v5.py --serve-box --ball-speed 12 --viewer
+python scripts/sim/rm65_mpc_tube_constraint_realtime_v5.py --serve-box --ball-speed 15 --viewer
 
 # 指定随机种子
-python scripts/rm65_mpc_tube_constraint_realtime_v5.py --serve-box --seed 42 --viewer
+python scripts/sim/rm65_mpc_tube_constraint_realtime_v5.py --serve-box --seed 42 --viewer
 
 # 关闭 Tube（纯 MPC+iLQR 基线）
-python scripts/rm65_mpc_tube_constraint_realtime_v5.py --use_tube false --viewer --seed 42
+python scripts/sim/rm65_mpc_tube_constraint_realtime_v5.py --use_tube false --viewer --seed 42
 
-# 启用异步重规划 + 实时节奏
-python scripts/rm65_mpc_tube_constraint_realtime_v5.py --serve-box --async-replan --realtime --viewer
+# 离线仿真（更快）
+python scripts/rm65_mpc_tube_constraint.py --serve-box --ball-speed 9 --no-plot
 
-# 施加时空扰动（鲁棒性测试）
-python scripts/rm65_mpc_tube_constraint_realtime_v5.py --serve-box --time-perturb-ms 30 --space-perturb-m 0.05 --viewer
+# 离线批量实验（多进程并行）
+python scripts/exp/run_exp1_v3_batch.py --workers 4
 
-# TCP 限速实验
-python scripts/rm65_mpc_tube_constraint_realtime_v5.py --serve-box --max-tcp 2.0 --viewer
+# 结果提取
+python scripts/extract/extract_exp1_v3_results.py
 ```
 
 ### 关节调节查看器
 
 ```bash
-python scripts/rm65_joint_viewer.py
+python scripts/tools/rm65_joint_viewer.py
 ```
 
 打开后可拖动右侧 Control 面板滑条直接控制关节。按键：`R` 重置、`P` 打印、`F` 切换坐标轴。
@@ -176,14 +176,19 @@ mujoco_sim/
 │   └── v5_active_hit.yaml             # V5 主动击打配置（继承 default）
 │
 ├── scripts/
-│   ├── rm65_mpc_tube_constraint_realtime_v5.py   # ★ 主脚本：MPC+iLQR+Tube+安全滤波+主动击打
-│   ├── rm65_mpc_tube_constraint_realtime_v4.py   # V4：Softmin 多终端改进
-│   ├── rm65_mpc_tube_constraint_realtime.py      # V1：Tube+硬半空间约束
-│   ├── rm65_mpc_tube_constraint.py               # 离线版 Tube MPC
-│   ├── rm65_mpc_tube.py                          # Tube 基线
-│   ├── rm65_mpc_ilqr_5_5.py                     # MPC+iLQR 基线（后摆+退火+法向量）
-│   ├── rm65_joint_viewer.py                      # 关节调节查看器
-│   └── ...                                       # 实验/评估/绘图脚本
+│   ├── rm65_mpc_tube_constraint.py               # 离线仿真（根，被 exp 包装 import）
+│   ├── rm65_mpc_tube_constraint_realtime.py      # 实时 v1（根）
+│   ├── rm65_mpc_tube_constraint_realtime_v2.py   # 实时 v2（根）
+│   ├── rm65_mpc_tube.py                          # Tube 基线（根）
+│   ├── rm65_mpc_ilqr_5_5.py                     # MPC+iLQR 后摆基线（根）
+│   ├── rm65_evaluate.py                          # 评估脚本（根）
+│   ├── sim/          # 独立仿真 13 个（v4/v5/fast/ilqt/train）
+│   ├── exp/          # 实验设施 25 个（包装·批量·运行器）
+│   ├── extract/      # 结果提取 4 个（日志→CSV）
+│   ├── plot/         # 论文图表 6 个
+│   ├── tools/        # 独立工具 7 个（查看器·扫描·可视化）
+│   ├── test/         # 快速验证 9 个
+│   └── README.md     # 完整清单与说明
 │
 ├── src/
 │   ├── robot/
@@ -217,6 +222,8 @@ mujoco_sim/
 ├── skills/                            # Agent Skill 定义
 └── docs/                              # 技术文档
 ```
+
+> 详细脚本清单见 [`scripts/README.md`](scripts/README.md)
 
 ---
 
