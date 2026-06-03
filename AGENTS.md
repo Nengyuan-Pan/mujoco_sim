@@ -179,6 +179,7 @@ mujoco_sim/
 | 论文图表生成 | `skills/figure_generation.md` | 8 张 IEEE RAL 论文图（系统/算法/关节/命中率/Tube/实时/诊断）| 生成论文图表时 |
 | 论文撰写 | `skills/paper_writing.md` | IEEE RAL 结构、中文草稿→英文翻译、符号表 | 撰写论文时 |
 | 论文审稿与迭代 | `skills/paper_review.md` | 6 维自审查单、审稿报告模板、迭代工作流 | 审查论文草稿时 |
+| 实验记录 | `skills/experiment_log.md` | 实验后自动生成记录：读取CSV→聚合统计→填写模板→更新索引 | 运行批量实验后 / "记录实验" |
 
 ### 实验数据目录
 - 所有实验数据存放在 `experiment_data/` 目录
