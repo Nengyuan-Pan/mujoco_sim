@@ -19,7 +19,7 @@ WRAPPER = PROJECT_ROOT / "scripts" / "exp" / "_run_exp7_noise.py"
 PYTHON_EXE = str(Path(sys.executable))
 
 SPEEDS = [8, 10, 12, 14, 16, 18, 20]
-SEEDS = list(range(5))
+SEEDS = list(range(20))
 TUBE_MODES = ["true", "false"]
 NOISE_MODES = ["off", "lo", "mid", "hi", "anis"]
 

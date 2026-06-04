@@ -101,4 +101,33 @@ sys.argv = [
 ]
 
 import scripts.rm65_mpc_tube_constraint as main_mod       # noqa: E402
+
+# ============================================================
+# Monkey-patch: find_hitting_point_physics 缓存回退
+# 噪声可能导致预测失败返回 None → 回退到上次有效结果继续规划
+# ============================================================
+_last_hit_cache: dict | None = None
+_last_horizon: int = 0
+
+_orig_find_hitting = main_mod.find_hitting_point_physics
+
+
+def _robust_find_hitting(env, ball_pos, ball_vel, shoulder_pos, workspace_radius, horizon):
+    global _last_hit_cache, _last_horizon
+    result = _orig_find_hitting(env, ball_pos, ball_vel, shoulder_pos, workspace_radius, horizon)
+    if result is not None:
+        _last_hit_cache = dict(result)
+        _last_horizon = horizon
+        return result
+    if _last_hit_cache is not None:
+        cached = dict(_last_hit_cache)
+        step_delta = _last_horizon - horizon
+        cached["k_hit"] = max(1, cached["k_hit"] - step_delta)
+        _last_horizon = horizon
+        return cached
+    return None
+
+
+main_mod.find_hitting_point_physics = _robust_find_hitting
+
 main_mod.main()
