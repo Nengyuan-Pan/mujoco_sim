@@ -31,6 +31,14 @@
 
 ## 结论
 
+### 数据观察（Agent 生成）
+
+1. 严格约束下 7-8 m/s 命中率均为 80%（Tube ON 8/10，Tube OFF 8/10），位置误差 29-40mm。
+2. 5-6 m/s 全部生成失败（serve_box bounce 模式最低球速限制 8 m/s），40 runs 中 20 runs 失败。
+3. Tube ON/OFF 误差几乎相同（28.7mm vs 28.7mm @ 7m/s），低速无扰动下无差异。
+
+### 分析与决策（人工填写）
+
 1. 严格约束下 7-8 m/s 命中率 80%，位置误差 29-40mm。
 2. serve_box 弹跳模式最低球速 8 m/s，低于此值全部 RuntimeError。
 3. Tube ON/OFF 在低速无扰动时无差异 — 需扰动实验验证 Tube 价值。

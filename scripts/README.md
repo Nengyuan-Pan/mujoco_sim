@@ -11,8 +11,8 @@
 |------|------|------|---------|
 | `scripts/` (根) | 6 | 核心仿真脚本（被 cross-import） | `python scripts/xxx.py --args` |
 | `sim/` | 13 | 独立仿真脚本（MPC/iLQR/Training） | `python scripts/sim/xxx.py --args` |
-| `exp/` | 25 | 实验基础设施（包装·批量·运行器） | `python scripts/exp/xxx.py --args` |
-| `extract/` | 4 | 结果提取：日志 → CSV | `python scripts/extract/xxx.py` |
+| `exp/` | 28 | 实验基础设施（包装·批量·运行器） | `python scripts/exp/xxx.py --args` |
+| `extract/` | 5 | 结果提取：日志 → CSV | `python scripts/extract/xxx.py` |
 | `plot/` | 6 | 论文图表生成 | `python scripts/plot/xxx.py` |
 | `tools/` | 7 | 独立工具（查看器·扫描·可视化） | `python scripts/tools/xxx.py` |
 | `test/` | 9 | 快速验证脚本 | `python scripts/test/xxx.py` |
@@ -52,12 +52,13 @@
 
 ### exp/ — 实验基础设施（25 个）
 
-#### 包装脚本（3 个）
+#### 包装脚本（4 个）
 | 文件 | 用途 |
 |------|------|
 | `_run_exp1_exempt.py` | 速度豁免 monkey-patch（bounce 模式） |
 | `_run_exp1_v3_exempt.py` | 速度豁免 + no-bounce |
 | `_run_strict_experiment.py` | 严格约束 monkey-patch |
+| `_run_exp2_v3_strict.py` | 严格约束包装（exp2_v3，离线） |
 
 #### TCP 限速实验（3 个）
 | 文件 | 用途 |
@@ -66,12 +67,13 @@
 | `run_tcp_limit_experiment_v2.py` | TCP+关节双约束 v2 |
 | `run_tcp_limit_experiment_v3.py` | TCP+关节双约束 v3（无豁免） |
 
-#### 批量运行器（4 个）
+#### 批量运行器（5 个）
 | 文件 | 用途 |
 |------|------|
 | `run_exp1_batch.py` | Exp1 bounce 模式扫参 |
 | `run_exp1_v3_batch.py` | Exp1 V3 并行扫参（540 runs, 4 workers） |
 | `run_exp2_v2_batch.py` | Exp2 低球速扫参（7-8 m/s） |
+| `run_exp2_v3_batch.py` | Exp2 V3 严格约束并行扫参（8-18 m/s, 4 workers） |
 | `run_v3_experiments.py` | V3 实验批量 |
 
 #### 实验专用运行器（12 个）
@@ -93,7 +95,7 @@
 | `run_20hits_video.py` | 20 次连续击球 + 视频 |
 | `sweep_margins.py` | 关节裕度扫参 |
 
-### extract/ — 结果提取（4 个）
+### extract/ — 结果提取（5 个）
 
 | 文件 | 数据源 |
 |------|--------|
@@ -101,6 +103,7 @@
 | `extract_exp1_v3_results.py` | exp1_v3_algorithm_capability |
 | `extract_exp2_results.py` | exp2_strict_joint（实时，含 UTF-16LE 处理） |
 | `extract_exp2_v2_results.py` | exp2_strict_joint_v2（离线格式） |
+| `extract_exp2_v3_results.py` | exp2_v3_strict_joint（离线格式） |
 
 ### plot/ — 图表生成（6 个）
 

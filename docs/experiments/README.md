@@ -16,3 +16,4 @@
 | 2026-06-03 | [exp2 低球速](2026-06-03_exp2_v2_low_speed.md) | 7-8 | 严格 | 80% | 降到 7-8m/s 可命中；serve_box 最低 8m/s |
 | 2026-06-03 | [exp1 豁免 bounce](2026-06-03_exp1_algorithm_capability.md) | 8-18 | 豁免 | 40-90% | 算法上限 ~15m/s；全部被动接触 |
 | 2026-06-03 | [exp1 v3 no-bounce](2026-06-03_exp1_v3_nobounce_sweep.md) | 8-30 | 豁免 | 0-90% | no-bounce 更难命中；30m/s 归零；15.6min |
+| 2026-06-04 | [exp2 v3 严格约束](2026-06-04_exp2_v3_strict_joint.md) | 8-18 | 严格 | 20-80% | 14m/s 断崖；关速峰值 1.65x；0 生成失败；3.6min |

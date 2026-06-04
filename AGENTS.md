@@ -128,7 +128,8 @@ mujoco_sim/
 │   └── utils/
 │       ├── __init__.py
 │       ├── math_utils.py              # 通用数学工具
-│       └── mujoco_loader.py           # 跨平台安全模型加载器（处理中文路径）
+│       ├── mujoco_loader.py           # 跨平台安全模型加载器（处理中文路径）
+│       └── noise.py                   # 噪声注入（观测/力矩/初始关节随机化）
 ├── configs/
 │   ├── default.yaml                   # 默认超参数（时间步长、iLQR 参数、关节约束）
 │   ├── mpc.yaml                       # MPC 专用参数
@@ -152,7 +153,8 @@ mujoco_sim/
 │   ├── test_kinematics.py
 │   ├── test_linearize.py
 │   ├── test_mpc.py
-│   └── test_ball.py
+│   ├── test_ball.py
+│   └── test_noise.py
 ├── experiment_data/                  # 实验数据（按 exp1~exp6 组织）
 │   └── README.md                     # 数据存储规范
 ├── paper/                            # 论文 LaTeX 工程
@@ -179,7 +181,7 @@ mujoco_sim/
 | 论文图表生成 | `skills/figure_generation.md` | 8 张 IEEE RAL 论文图（系统/算法/关节/命中率/Tube/实时/诊断）| 生成论文图表时 |
 | 论文撰写 | `skills/paper_writing.md` | IEEE RAL 结构、中文草稿→英文翻译、符号表 | 撰写论文时 |
 | 论文审稿与迭代 | `skills/paper_review.md` | 6 维自审查单、审稿报告模板、迭代工作流 | 审查论文草稿时 |
-| 实验记录 | `skills/experiment_log.md` | 实验后自动生成记录：读取CSV→聚合统计→填写模板→更新索引 | 运行批量实验后 / "记录实验" |
+| 实验记录 | `skills/experiment_log.md` | 实验后自动生成记录：读取CSV→聚合统计→Agent 数据观察结论+人工分析决策→更新索引 | 运行批量实验后 / "记录实验" |
 
 ### 实验数据目录
 - 所有实验数据存放在 `experiment_data/` 目录
