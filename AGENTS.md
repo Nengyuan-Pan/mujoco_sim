@@ -155,7 +155,7 @@ mujoco_sim/
 │   ├── test_mpc.py
 │   ├── test_ball.py
 │   └── test_noise.py
-├── experiment_data/                  # 实验数据（按 exp1~exp6 组织）
+├── experiment_data/                  # 实验数据（按 exp1~exp7 组织）
 │   └── README.md                     # 数据存储规范
 ├── paper/                            # 论文 LaTeX 工程
 │   ├── main.tex
@@ -177,7 +177,7 @@ mujoco_sim/
 | 代码框架设计 | `skills/framework_design.md` | 设计代码架构、模块归属、接口定义 | 创建/重构模块时 |
 | 文件管理 | `skills/file_management.md` | 文件创建/移动/命名规范、目录结构映射 | 添加/移动文件时 |
 | 仿真运行 | `skills/sim_run.md` | iLQT 训练、MuJoCo 评估、轨迹回放 | 启动仿真/训练时 |
-| 实验设计与数据管理 | `skills/experiment_design.md` | 6 组实验矩阵设计、批量运行、CSV/NPZ 数据管理 | 运行批量实验时 |
+| 实验设计与数据管理 | `skills/experiment_design.md` | 7 组实验矩阵设计、批量运行、CSV/NPZ 数据管理 | 运行批量实验时 |
 | 论文图表生成 | `skills/figure_generation.md` | 8 张 IEEE RAL 论文图（系统/算法/关节/命中率/Tube/实时/诊断）| 生成论文图表时 |
 | 论文撰写 | `skills/paper_writing.md` | IEEE RAL 结构、中文草稿→英文翻译、符号表 | 撰写论文时 |
 | 论文审稿与迭代 | `skills/paper_review.md` | 6 维自审查单、审稿报告模板、迭代工作流 | 审查论文草稿时 |
@@ -185,7 +185,7 @@ mujoco_sim/
 
 ### 实验数据目录
 - 所有实验数据存放在 `experiment_data/` 目录
-- 按 `exp1~exp6` 编号组织，每组含 `config.yaml` + `results.csv` + `raw/`
+- 按 `exp1~exp7` 编号组织，每组含 `config.yaml` + `results.csv` + `raw/`
 - 详见 `experiment_data/README.md`
 
 ## 核心算法说明
