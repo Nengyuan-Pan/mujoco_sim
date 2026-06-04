@@ -17,3 +17,4 @@
 | 2026-06-03 | [exp1 豁免 bounce](2026-06-03_exp1_algorithm_capability.md) | 8-18 | 豁免 | 40-90% | 算法上限 ~15m/s；全部被动接触 |
 | 2026-06-03 | [exp1 v3 no-bounce](2026-06-03_exp1_v3_nobounce_sweep.md) | 8-30 | 豁免 | 0-90% | no-bounce 更难命中；30m/s 归零；15.6min |
 | 2026-06-04 | [exp2 v3 严格约束](2026-06-04_exp2_v3_strict_joint.md) | 8-18 | 严格 | 20-80% | 14m/s 断崖；关速峰值 1.65x；0 生成失败；3.6min |
+| 2026-06-04 | [exp7 噪声×Tube 消融](2026-06-04_exp7_noise_tube_ablation.md) | 8-20 | 豁免+噪声 | 0-74% | lo噪声从70%骤降至4%；Tube无鲁棒性优势；mid+完全失效 |
