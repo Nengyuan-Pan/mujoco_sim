@@ -11,7 +11,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 RAW_DIR = PROJECT_ROOT / "experiment_data" / "exp7_noise_tube_ablation" / "raw"
 CSV_PATH = RAW_DIR.parent / "results.csv"
-SPEEDS = [8, 10, 12, 14, 16, 18, 20]
+SPEEDS = [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
 NOISE_MODES = ["off", "lo", "mid", "hi", "anis"]
 TUBE_MODES = ["true", "false"]
 
