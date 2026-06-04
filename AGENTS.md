@@ -129,7 +129,7 @@ mujoco_sim/
 │       ├── __init__.py
 │       ├── math_utils.py              # 通用数学工具
 │       ├── mujoco_loader.py           # 跨平台安全模型加载器（处理中文路径）
-│       └── noise.py                   # 噪声注入（观测/力矩/初始关节随机化）
+│       └── noise.py                   # 噪声注入（观测/力矩/初始关节随机化，支持 per-axis std + Z clamp）
 ├── configs/
 │   ├── default.yaml                   # 默认超参数（时间步长、iLQR 参数、关节约束）
 │   ├── mpc.yaml                       # MPC 专用参数
@@ -237,6 +237,23 @@ mujoco_sim/
 - 给定球的初始位置和速度，预测球在任意时刻的位置
 - 计算击打时刻和击打点：球到达球拍可及范围内的时间点
 - serve_box 模式：从 8m×0.2m×0.3m 范围内随机发球
+
+### 噪声注入（`src/utils/noise.py`）
+- **模块状态**：已开发，测试通过（17 tests），尚未集成到主脚本
+- **三个纯函数**：
+  - `add_observation_noise`：球位置/速度观测噪声，支持标量 std（向后兼容）和 per-axis std（各向异性，如深度方向误差更大），per-axis 优先；Z 坐标 clamp ≥ 0.01m 防止球在地下
+  - `add_torque_noise`：力矩执行噪声（暂不在实验中使用）
+  - `randomize_init_q`：初始关节角度随机化
+- **接口设计**：
+  ```python
+  # 标量模式（向后兼容）
+  add_observation_noise(pos, vel, rng, pos_std=0.05, vel_std=0.3)
+  # per-axis 模式（Z 轴误差更大，模拟深度相机特性）
+  add_observation_noise(pos, vel, rng, pos_std_xyz=(0.02, 0.02, 0.05))
+  ```
+- **噪声特性**：零均值高斯、独立同分布、seed 可复现、不修改输入数组
+- **未建模的二阶效应**（经评估暂不修复）：位置/速度相关性、距离相关 std、速度裁剪
+- **集成验证**：`scripts/test/test_noise_integration.py`（一次性工具，不进 git），σ_p=0.03/σ_v=0.3 下规划成功率下降 15%，p_hit 偏差均值 125mm
 
 ## 优化策略
 - **雅可比转置初始控制（JT warm-start）**：使用 `J^T * (p_hit - p_ee)` 生成初始控制序列，远优于零/常数力矩初始猜测

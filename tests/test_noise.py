@@ -68,7 +68,7 @@ class TestObservationNoiseStatistics:
     def test_pos_noise_mean_near_zero(self) -> None:
         """大量样本的位置噪声均值应接近零。"""
         rng = np.random.default_rng(42)
-        ball_pos = np.zeros(3)
+        ball_pos = np.array([0.0, 0.0, 1.2])
         ball_vel = np.zeros(3)
         pos_std = 0.02
 
@@ -80,7 +80,7 @@ class TestObservationNoiseStatistics:
             samples.append(pos_out.copy())
         samples = np.array(samples)
 
-        np.testing.assert_allclose(samples.mean(axis=0), 0.0, atol=0.001)
+        np.testing.assert_allclose(samples.mean(axis=0), ball_pos, atol=0.001)
         np.testing.assert_allclose(samples.std(axis=0), pos_std, atol=0.003)
 
 
@@ -166,6 +166,104 @@ class TestReproducibility:
         q2 = randomize_init_q(init_q, rng2, noise_rad=0.02)
 
         np.testing.assert_array_equal(q1, q2)
+
+
+class TestPerAxisPosNoise:
+    """pos_std_xyz 各轴独立标准差。"""
+
+    def test_per_axis_pos_std(self) -> None:
+        """pos_std_xyz=(0.01, 0.01, 0.05) 时 Z 轴 std≈0.05，X/Y≈0.01。"""
+        rng = np.random.default_rng(42)
+        ball_pos = np.array([0.0, 0.0, 1.2])
+        ball_vel = np.zeros(3)
+        samples = []
+        for _ in range(5000):
+            pos, _ = add_observation_noise(
+                ball_pos, ball_vel, rng,
+                pos_std_xyz=(0.01, 0.01, 0.05),
+            )
+            samples.append(pos.copy())
+        samples = np.array(samples)
+        np.testing.assert_allclose(samples.std(axis=0)[0], 0.01, atol=0.003)
+        np.testing.assert_allclose(samples.std(axis=0)[1], 0.01, atol=0.003)
+        np.testing.assert_allclose(samples.std(axis=0)[2], 0.05, atol=0.005)
+
+
+class TestPerAxisAllZero:
+    """per-axis 全零等价于不加噪声。"""
+
+    def test_xyz_all_zero_is_identity(self) -> None:
+        """pos_std_xyz=(0,0,0) 时位置不变。"""
+        rng = np.random.default_rng(42)
+        ball_pos = np.array([0.5, -0.3, 1.2])
+        ball_vel = np.array([9.0, 0.1, -2.0])
+
+        pos, vel = add_observation_noise(
+            ball_pos, ball_vel, rng,
+            pos_std_xyz=(0.0, 0.0, 0.0),
+            vel_std_xyz=(0.0, 0.0, 0.0),
+        )
+
+        np.testing.assert_array_equal(pos, ball_pos)
+        np.testing.assert_array_equal(vel, ball_vel)
+
+
+class TestZClamp:
+    """噪声后球 Z 坐标不低于地面。"""
+
+    def test_z_clamped_above_ground(self) -> None:
+        """Z 接近地面加大噪声后，Z 始终 >= 0.01。"""
+        rng = np.random.default_rng(42)
+        ball_pos = np.array([0.5, -0.3, 0.02])
+        ball_vel = np.zeros(3)
+        for _ in range(1000):
+            pos, _ = add_observation_noise(
+                ball_pos, ball_vel, rng,
+                pos_std=0.05,
+            )
+            assert pos[2] >= 0.01
+
+
+class TestPerAxisOverridesScalar:
+    """per-axis 参数非 None 时忽略标量 pos_std/vel_std。"""
+
+    def test_xyz_overrides_scalar_pos(self) -> None:
+        """pos_std=0.02 且 pos_std_xyz 非 None 时使用 per-axis 值。"""
+        rng1 = np.random.default_rng(99)
+        rng2 = np.random.default_rng(99)
+        ball_pos = np.array([1.0, 2.0, 3.0])
+        ball_vel = np.zeros(3)
+
+        pos1, _ = add_observation_noise(
+            ball_pos, ball_vel, rng1,
+            pos_std=0.02,
+            pos_std_xyz=(0.01, 0.01, 0.05),
+        )
+        pos2, _ = add_observation_noise(
+            ball_pos, ball_vel, rng2,
+            pos_std_xyz=(0.01, 0.01, 0.05),
+        )
+        np.testing.assert_array_equal(pos1, pos2)
+
+
+class TestPerAxisVelNoise:
+    """vel_std_xyz 各轴独立标准差。"""
+
+    def test_per_axis_vel_std(self) -> None:
+        """vel_std_xyz=(0.1, 0.1, 0.3) 时 Z 轴 std≈0.3。"""
+        rng = np.random.default_rng(42)
+        ball_pos = np.zeros(3)
+        ball_vel = np.zeros(3)
+        samples = []
+        for _ in range(5000):
+            _, vel = add_observation_noise(
+                ball_pos, ball_vel, rng,
+                vel_std_xyz=(0.1, 0.1, 0.3),
+            )
+            samples.append(vel.copy())
+        samples = np.array(samples)
+        np.testing.assert_allclose(samples.std(axis=0)[0], 0.1, atol=0.01)
+        np.testing.assert_allclose(samples.std(axis=0)[2], 0.3, atol=0.02)
 
 
 class TestDifferentSeedDifferentResult:
