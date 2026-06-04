@@ -2731,7 +2731,7 @@ def main() -> None:
 
     # ---- 逐步耗时分类 ----
     _s_arr = np.array(step_times)
-    _r_mask = np.array(step_is_replan)
+    _r_mask = np.array(step_is_replan, dtype=bool)
     avg_step_ms = np.mean(_s_arr) * 1000 if len(_s_arr) > 0 else 0
     avg_non_replan_step_ms = np.mean(_s_arr[~_r_mask]) * 1000 if np.any(~_r_mask) else 0
     max_step_ms = np.max(_s_arr) * 1000 if len(_s_arr) > 0 else 0
