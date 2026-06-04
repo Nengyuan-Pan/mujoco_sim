@@ -23,11 +23,14 @@ def parse_log(log_path: Path) -> dict:
         text = raw.decode("utf-16-le", errors="ignore")
 
     name = log_path.stem
-    parts = name.split("_")
-    speed = int(parts[0].replace("speed", ""))
-    seed = int(parts[1].replace("seed", ""))
-    tube_on = "true" in parts[2]
-    noise_mode = parts[3].replace("noise_", "") if len(parts) > 3 else "off"
+    m_name = re.match(r"speed(\d+)_seed(\d+)_tube_(true|false)_noise_(.+)", name)
+    if not m_name:
+        return {"ball_speed": 0, "seed": 0, "use_tube": "false", "noise_mode": "unknown",
+                "hit": "False", "status": "parse_error"}
+    speed = int(m_name.group(1))
+    seed = int(m_name.group(2))
+    tube_on = m_name.group(3) == "true"
+    noise_mode = m_name.group(4)
 
     result = {
         "ball_speed": speed,
