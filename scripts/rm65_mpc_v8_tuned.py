@@ -1,47 +1,31 @@
-"""RM-65 Tube-based Robust Hitting + 右臂硬半空间约束 实验脚本（V5）。
+"""RM-65 V8: V6 + 解耦 Tube 和 Softmin，独立控制。
 
-=== V5 相对 V4 的改进 ===
+=== V8 vs V6 ===
+  - Tube 走廊代价和 Softmin 终端代价解耦
+  - --no-tube: 关闭 Tube 走廊代价（保留 softmin）
+  - --no-softmin: 关闭 Softmin 终端代价（保留 Tube 走廊）
+  - 两者都不加: Tube + Softmin 全部启用
+  - 两者都加: 纯 base_cost（等同 v6 --no-softmin）
 
-1. Midpoint 机制（核心改进）:
-   v4 仅靠终端代价引导到击球点。v5 在 k_hit 步设置中途目标：
-     set_midpoint_target(k_hit, p_hit, Q_p*2.0, v_target=v_hit_at_contact, Q_midpoint_v=Q_v*5.0)
-   效果: iLQR 轨迹在 k_hit 步强制经过击球位置 p_hit，且速度匹配期望击球速度。
-   激活条件: k_hit < horizon_plan（近阶段生效，远阶段 midpoint 在规划范围外）。
-   这是 v5 高成功率（96%）的关键: 近阶段精确约束时空，远阶段 softmin 提供鲁棒性。
-
-2. 终端目标改为随挥终点:
-   v4 终端 = p_hit + 0.01m（击球点附近）。v5 终端 = p_hit + 0.4~0.5m * d_hat（随挥终点）。
-   iLQR 规划"加速→击球→减速→随挥终点"的完整轨迹。
-   配合 midpoint：midpoint 在 k_hit 强制经过 p_hit（高速），终端在随挥终点（低速 0.3m/s）。
-   这创造了"穿过击球点"的动量效果，而非"停在击球点"。
-
-3. 扩展 total_horizon 包含随挥段:
-   v4 total_horizon 不含随挥，通过 continue 跳过正常循环。v5 扩展 horizon 含随挥段。
-
-4. 碰撞检测触发随挥:
-   v4 仅在 k_hit <= 1 时触发随挥。v5 额外增加了碰撞检测触发：
-   当 ball_was_hit 且 step - hit_step >= 3 时也进入随挥模式。
-
-=== 与 V2 的差异汇总 ===
-v5 继承了 v4 的所有改进（来球方向自适应、秩1 Q_v、PD 随挥），并新增 midpoint + 随挥终端。
-
-=== 已知问题 ===
-- 击球时 TCP 速度 ≈ 0 m/s（vel_error ≈ 5.0 m/s vs 期望 5.0 m/s）
-  原因: TCP 硬限 1.8 m/s + 终端指向随挥终点导致 arm 在击球点附近减速
-  消融实验中仍达 96% 成功率（12cm 阈值），但击球力度不足
+=== V6 架构（继承） ===
+  1. 终端目标 = p_hit + follow_through_length * d_follow
+  2. 终端速度 = 5.0 m/s * d_follow
+  3. Q_v = 满秩 diag([400,400,400])
+  4. 来球反方向作为击球方向
+  5. TubeHittingCostWrapper softmin（v2 风格），不设 midpoint
+  6. PD 随挥控制器（击球后接管）
 
 === 版本架构对比 ===
 
-              击球方向    终端目标          Q_v         Midpoint  随挥
-  v2          固定YAML    p_hit+0.01m      满秩[400]   无        无
-  v4          来球反向    p_hit+0.01m      秩1[10000]  无        PD控制器
-  v5(本文件)  来球反向    p_hit+0.5m(随挥) 秩1[10000]  有(k_hit) PD+碰撞触发
-  v6(开发中)  来球反向    p_hit(击球点)    秩1[10000]  可选      PD控制器
+  版本         击球方向    终端目标          Q_v         Midpoint  随挥        成功率
+  v2           固定YAML    p_hit+0.01m      满秩[400]   无        无(break)   96%
+  v3           固定YAML    p_hit+0.01m      满秩[400]   无        无(break)   96%(=v2+硬约束)
+  v5           来球反向    p_hit+0.5m       秩1[10000]  有(k_hit) PD+碰撞     62%
+  v6(本版本)   来球反向    p_hit+偏移       满秩[400]   无        PD          91%
 
 用法:
-  python scripts/rm65_mpc_tube_constraint_realtime_v5.py --serve-box --ball-speed 12 --viewer
-  python scripts/rm65_mpc_tube_constraint_realtime_v5.py --serve-box --ball-speed 15 --viewer
-  python scripts/rm65_mpc_tube_constraint_realtime_v5.py --use_tube false --viewer --seed 42
+  python scripts/rm65_mpc_v6.py --serve-box --ball-speed 7 --viewer
+  python scripts/rm65_mpc_v6.py --serve-box --ball-speed 7 --no-backswing
 """
 
 from __future__ import annotations
@@ -832,7 +816,7 @@ class TubeHittingCostWrapper:
     - 兼容 ILQTSolver 的接口
     """
 
-    RACKET_RADIUS: float = 0.12
+    RACKET_RADIUS: float = 0.05
 
     def __init__(
         self,
@@ -972,7 +956,11 @@ class TubeHittingCostWrapper:
     def _compute_single_terminal(
         self, p_ee: np.ndarray, v_ee: np.ndarray, n_rack: np.ndarray
     ) -> float:
-        """原始单点终端代价（best_k 处的精确击打约束）。"""
+        """原始单点终端代价（best_k 处的精确击打约束）。
+
+        v8 改进：终端代价不再乘以 (1-ratio)，始终完整保留。
+        Tube 走廊代价作为辅助项叠加在运行代价上，不削弱终端目标。
+        """
         dp = p_ee - self.base_cost.p_hit
         cost_p = 0.5 * float(dp @ self.base_cost.Q_p @ dp)
 
@@ -983,7 +971,7 @@ class TubeHittingCostWrapper:
         if self.base_cost.n_des is not None and self.base_cost.Q_n > 0:
             n_err = n_rack - self.base_cost.n_des
             cost += 0.5 * self.base_cost.Q_n * float(n_err @ n_err)
-        return (1.0 - self._current_ratio) * cost
+        return cost
 
     def _compute_softmin_terminal(
         self, p_ee: np.ndarray, v_ee: np.ndarray, n_rack: np.ndarray
@@ -1027,7 +1015,7 @@ class TubeHittingCostWrapper:
         log_sum = max_wnc + np.log(np.sum(np.exp(weighted_neg_costs - max_wnc)))
         softmin_val = -log_sum / beta
 
-        return (1.0 - self._current_ratio) * softmin_val
+        return softmin_val
 
     def running_derivatives(
         self, x: np.ndarray, u: np.ndarray, k: int | None = None
@@ -1064,8 +1052,7 @@ class TubeHittingCostWrapper:
                 p_ee, v_ee, n_rack, J_p, n_x, n_q
             )
 
-        scale = 1.0 - self._current_ratio
-        return scale * l_x, scale * l_xx
+        return l_x, l_xx
 
     def _compute_single_terminal_derivatives(
         self,
@@ -1243,21 +1230,13 @@ class TubeHittingCostWrapper:
     def _compute_tube_cost_at_k(self, x: np.ndarray, k: int) -> float:
         """计算步骤 k 处的空间走廊 tube 代价值。
 
-        走廊半宽 = RACKET_RADIUS（固定）。
-        走廊内（perp_dist < RACKET_RADIUS）零代价，
-        走廊外二次惩罚。
-
-        三项代价：
-        1. 垂直偏离代价（hinge loss）：margin > 0 时惩罚
-        2. 速度方向代价：球拍速度垂直于球轨迹方向的分量
-        3. 法向量代价：拍面法向与期望法向的对齐程度
+        v8 重新设计：轻量级走廊引导，仅保留 hinge loss 位置偏离代价。
+        不再惩罚速度/法向量（这些由终端代价处理）。
+        走廊半宽 = RACKET_RADIUS，走廊内零代价，走廊外温和二次惩罚。
         """
         self.env.set_arm_state(x)
         p_ee = self.env.get_ee_pos()
-        v_ee = self.env.get_ee_vel()
-        n_rack = self.env.get_ee_normal()
 
-        # 1. 垂直偏离代价（hinge loss）
         dp = p_ee - self._p_ball_ref
         dp_perp = self._P_perp @ dp
         perp_dist = float(np.linalg.norm(dp_perp))
@@ -1265,35 +1244,22 @@ class TubeHittingCostWrapper:
         pos_err = max(0.0, margin)
         pos_cost = self._Q_p_tube * pos_err**2
 
-        # 2. 速度方向代价：球拍速度垂直分量应尽量小
-        v_perp = self._P_perp @ v_ee
-        vel_cost = self._Q_v_tube * float(v_perp @ v_perp)
-
-        # 3. 法向量代价
-        n_dot = float(n_rack @ self._n_des_common)
-        normal_cost = self._Q_n_tube * (1.0 - n_dot)
-
         scale = self._tube_weight_scales.get(k, 1.0)
-        return 0.5 * scale * (pos_cost + vel_cost + normal_cost)
+        return 0.5 * scale * pos_cost
 
     def _compute_tube_derivatives_at_k(
         self, x: np.ndarray, k: int
     ) -> tuple[np.ndarray, np.ndarray]:
-        """计算步骤 k 处空间走廊 tube 代价的 Gauss-Newton 近似导数。
+        """计算步骤 k 处空间走廊 tube 代价的导数。
 
-        hinge loss 的导数仅在 margin > 0 时激活，
-        走廊内梯度为零（不干扰优化），走廊外提供平滑梯度引导球拍回到走廊内。
-
-        Returns:
-            (l_x_tube, l_xx_tube)
+        v8 简化版：仅 hinge loss 位置偏离的梯度。
+        margin > 0 时提供平滑梯度，走廊内梯度为零。
         """
         self.env.set_arm_state(x)
         n_x = self.env.NX
         n_q = self.env.NQ
 
         p_ee = self.env.get_ee_pos()
-        v_ee = self.env.get_ee_vel()
-        n_rack = self.env.get_ee_normal()
         J_p = self.env.get_ee_jacp()
 
         scale = self._tube_weight_scales.get(k, 1.0)
@@ -1301,48 +1267,18 @@ class TubeHittingCostWrapper:
         l_x_tube = np.zeros(n_x)
         l_xx_tube = np.zeros((n_x, n_x))
 
-        # ---- 1. 垂直偏离代价（hinge loss）----
-        # cost = Q_p * max(0, perp_dist - RACKET_RADIUS)^2
-        # 当 margin > 0 时有梯度，否则为零
         dp = p_ee - self._p_ball_ref
         dp_perp = self._P_perp @ dp
         perp_dist = float(np.linalg.norm(dp_perp))
         margin = perp_dist - self.RACKET_RADIUS
 
         if margin > 0.0 and perp_dist > 1e-8:
-            # 梯度方向：dp_perp 的单位向量
             dp_perp_hat = dp_perp / perp_dist
-            # ∂perp_dist/∂q = dp_perp_hat^T @ P_perp @ J_p
-            grad_perp_q = dp_perp_hat @ self._P_perp @ J_p  # (n_q,)
+            grad_perp_q = dp_perp_hat @ self._P_perp @ J_p
             l_x_tube[:n_q] += self._Q_p_tube * margin * grad_perp_q
             l_xx_tube[:n_q, :n_q] += self._Q_p_tube * np.outer(grad_perp_q, grad_perp_q)
 
-        # 可解释性：缓存走廊 margin
         self._last_tube_margins[k] = margin
-
-        # ---- 2. 速度方向代价 (v_perp = P_perp @ v_ee) ----
-        Jp_perp = self._P_perp @ J_p
-        v_perp = self._P_perp @ v_ee
-        l_x_tube[n_q:] += self._Q_v_tube * (Jp_perp.T @ v_perp)
-        l_xx_tube[n_q:, n_q:] += self._Q_v_tube * (Jp_perp.T @ Jp_perp)
-
-        # ---- 3. 法向量代价 ----
-        J_omega = self.env.get_ee_jacr()
-        nx, ny, nz = -n_rack[0], -n_rack[1], -n_rack[2]
-        skew = np.array([
-            [0, -nz, ny],
-            [nz, 0, -nx],
-            [-ny, nx, 0],
-        ])
-        J_n = np.zeros((3, n_x))
-        J_n[:, :n_q] = skew @ J_omega
-
-        n_dot = float(n_rack @ self._n_des_common)
-        n_err_val = 1.0 - n_dot
-        if abs(n_err_val) > 1e-8:
-            dn_dx = -J_n.T @ self._n_des_common
-            l_x_tube += self._Q_n_tube * n_err_val * dn_dx
-            l_xx_tube += self._Q_n_tube * np.outer(dn_dx, dn_dx)
 
         l_x_tube *= scale
         l_xx_tube *= scale
@@ -1589,16 +1525,13 @@ def do_replan(
     # v5: 终端目标 = 随挥终点（击球点前方 follow_through_length）
     p_follow_new = p_hit_new + cfg["hit_shift"] * cfg["d_hat"]
 
-    # v5: 扩展 horizon 包含随挥段，击球时刻变为轨迹中段
-    follow_through_steps_cfg = cfg.get("follow_through_steps", 60)
-    follow_through_length_cfg = cfg.get("follow_through_length", 0.5)
-    follow_through_v_terminal_cfg = cfg.get("follow_through_v_terminal", 0.3)
-    horizon_full = k_hit_new + follow_through_steps_cfg  # v5: 终端在随挥终点
+    # v6: horizon 仅到击球时刻（不加随挥段）
+    horizon_full = k_hit_new
     horizon_plan = min(horizon_full, cfg["fixed_horizon"])
 
-    # v5: 终端目标 = 随挥终点（低速），iLQR 规划"加速→击球→减速→终点"
-    p_terminal_v5 = p_hit_new + follow_through_length_cfg * cfg["d_hat"]
-    v_terminal_v5 = follow_through_v_terminal_cfg * cfg["d_hat"]
+    # v6: 终端目标 = 击球点 + 偏移（arm 穿过击球点）
+    p_terminal_v5 = p_hit_new + cfg["follow_through_length"] * cfg["d_hat"]
+    v_terminal_v5 = cfg["v_hit_at_contact"]
 
     # 6. 位置误差 → 权重调度
     env_plan.set_arm_state(x_current)
@@ -1667,14 +1600,13 @@ def do_replan(
 
     # 9. 构建 cost_fn（使用临时 cost_fn，env_plan 独立 MjData）
     Q_p_mat = Q_p_scale * np.eye(3)
-    # v4: 方向对齐速度代价 — 只惩罚沿 d_follow 方向
-    d_follow = cfg.get("d_follow", np.array([0.0, -1.0, 0.0]))
-    Q_v_scalar = cfg.get("Q_v_scalar", 400.0)
-    Q_v_mat = Q_v_scale * Q_v_scalar * np.outer(d_follow, d_follow)
+    # v6: 满秩 Q_v（与 v2 一致）
+    Q_v_mat = Q_v_scale * np.eye(3)
     R_mat = cfg["R"] * np.eye(env_plan.NU)
+    max_tcp_val = float(cfg.get("max_tcp_speed", 1.8))
     cost_fn_plan = HittingCost(
         env_plan, p_terminal_v5, v_terminal_v5, Q_p_mat, Q_v_mat, R_mat,
-        n_des=n_des_new if cfg.get("Q_n", 0) > 0 else None,
+        Q_n=cfg.get("normal_weight", 500000.0),
     )
 
     if cfg.get("use_r_decay", False):
@@ -1684,13 +1616,7 @@ def do_replan(
         )[:horizon_plan]
         cost_fn_plan.set_R_schedule(R_schedule)
 
-    # v5: 中途位置目标 — 在 k_hit 步强制经过击球位置 + 鼓励高速
-    if k_hit_new > 0 and k_hit_new < horizon_plan:
-        Q_midpoint = Q_p_mat * 2.0
-        Q_midpoint_v = Q_v_mat * 5.0  # 速度代价权重（高权重鼓励击球时高速）
-        cost_fn_plan.set_midpoint_target(k_hit_new, p_hit_new, Q_midpoint,
-                                         v_target=cfg["v_hit_at_contact"],
-                                         Q_midpoint_v=Q_midpoint_v)
+    # v6: 不设 midpoint（与 v2 一致，避免梯度冲突）
 
     # 分阶段软平滑权重调度
     if hasattr(cost_fn_plan, 'set_smoothness_scale'):
@@ -1771,8 +1697,6 @@ def do_replan(
 def main() -> None:
     """RM-65 Tube-Based Robust Hitting 主函数。"""
     parser = argparse.ArgumentParser(description="RM-65 Tube-Based MPC+iLQT 网球击打")
-    parser.add_argument("--use_tube", type=str, default="true",
-                        help="是否启用 tube-based 鲁棒击球 (true/false)")
     parser.add_argument("--viewer", action="store_true", help="计算完成后以真实速度回放")
     parser.add_argument("--seed", type=int, default=None, help="随机种子")
     parser.add_argument("--fd", action="store_true", help="使用有限差分线性化")
@@ -1795,16 +1719,23 @@ def main() -> None:
     parser.add_argument("--serve-x-size", type=float, default=8.0, help="发球区 X 轴全长 (m)")
     parser.add_argument("--serve-y-size", type=float, default=0.2, help="发球区 Y 轴全长 (m)")
     parser.add_argument("--serve-z-size", type=float, default=0.3, help="发球区 Z 轴全长 (m)")
+    parser.add_argument("--Q-tcp-soft", type=float, default=5000.0, help="TCP 速度软惩罚权重 (0=禁用)")
+    parser.add_argument("--Q-qdot-limit", type=float, default=1000.0, help="关节速度软惩罚权重 (0=禁用)")
     parser.add_argument("--normal-weight", type=float, default=500000.0, help="拍面法向量代价权重")
     parser.add_argument("--normal-flip", action="store_true", help="翻转法向量方向")
     parser.add_argument("--replan-interval", type=int, default=None, help="重规划间隔步数")
     parser.add_argument("--near-iters", type=int, default=None, help="near阶段 iLQR 迭代次数 (默认20)")
     parser.add_argument("--window-ms", type=float, default=50.0, help="Tube 候选窗口半宽 (ms)")
-    parser.add_argument("--tube-cost-ratio", type=float, default=0.3, help="Tube 代价占比 (0~1)")
     parser.add_argument("--softmin-beta", type=float, default=5.0,
                         help="终端 softmin 锐度 β (1~20)，越大越接近 hard-min")
-    parser.add_argument("--no-softmin", action="store_true",
-                        help="禁用多终端 softmin（退化为单点终端代价）")
+    parser.add_argument("--no-softmin", action="store_true", help="禁用 softmin 多终端（消融实验用）")
+    parser.add_argument("--no-tube", action="store_true", help="禁用 Tube 走廊代价（保留 softmin，消融实验用）")
+    parser.add_argument("--no-follow-through", action="store_true", help="禁用球轨迹回溯随挥（消融实验用）")
+    parser.add_argument("--no-v-maximize", action="store_true", help="禁用中点速度最大化（消融实验用）")
+    parser.add_argument("--fixed-direction", action="store_true",
+                        help="使用固定 YAML hit_direction 替代 ball-reverse 方向")
+    parser.add_argument("--target-speed", type=float, default=1.8,
+                        help="终端目标速度 (m/s)，默认 1.8，v2 风格设 5.0")
     parser.add_argument("--no-plot", action="store_true", help="禁用 matplotlib 可视化")
     parser.add_argument("--dump-trajectory", type=str, default=None,
                         help="将轨迹数据保存到指定 pickle 文件路径")
@@ -1820,11 +1751,11 @@ def main() -> None:
                         help="球速耦合扰动百分比 (%%): 实际发球速度=ball_speed*(1+pct/100), MPC规划仍用标称球速")
     parser.add_argument("--max-tcp", type=float, default=None,
                         help="TCP 线速度硬限制 (m/s), 默认从配置文件读取, 0=不限速")
-    parser.add_argument("--terminal-exempt-steps", type=int, default=None,
-                        help="终段 qdot/TCP 豁免步数 (0=全程硬限), 默认从配置文件读取")
+    parser.add_argument("--terminal-exempt-steps", type=int, default=0,
+                        help="终段 qdot/TCP 豁免步数 (0=全程硬限), v6 默认=0")
     args = parser.parse_args()
 
-    use_tube = args.use_tube.lower() in ("true", "1", "yes")
+    use_tube = not args.no_tube  # v8: --no-tube 关闭 Tube 走廊代价
     use_analytical = not args.fd
     time_perturb_s = args.time_perturb_ms / 1000.0
     space_perturb_m = args.space_perturb_m
@@ -1833,7 +1764,7 @@ def main() -> None:
     # 加载配置
     base_path = Path(__file__).resolve().parent.parent / "configs"
     config_dict = load_config(base_path / "default.yaml")
-    # v5: 叠加 v5 主动击打配置
+    # v6: 叠加 v5 主动击打配置
     v5_config_path = base_path / "v5_active_hit.yaml"
     if v5_config_path.exists():
         v5_config = load_config(v5_config_path)
@@ -1845,6 +1776,12 @@ def main() -> None:
 
     dt = float(config_dict["sim"]["dt"])
     g = np.array(config_dict["ball"]["gravity"], dtype=np.float64)
+
+    # v6 消融：no-follow-through 时禁用随挥段
+    if args.no_follow_through:
+        config_dict["hitting"]["follow_through_steps"] = 0
+        config_dict["hitting"]["follow_through_length"] = 0.0
+        config_dict["hitting"]["follow_through_v_terminal"] = 0.0
 
     shoulder_pos = np.array([-0.1, -0.22693, 1.302645], dtype=np.float64)
     workspace_radius = 0.90
@@ -1896,15 +1833,15 @@ def main() -> None:
     use_r_decay = not args.no_r_decay
     r_decay_ratio = args.r_decay
 
-    # Tube 配置
+    # v8: Tube 配置 — 轻量级走廊引导
     tube_cfg = TubeConfig(
         window_half_ms=args.window_ms,
-        Q_p_tube=float(config_dict["cost"]["Q_p"][0]) * 2.0,
-        Q_v_tube=float(config_dict["cost"]["Q_v"][0]) * 50.0,
-        Q_n_tube=args.normal_weight,
-        tube_cost_ratio=args.tube_cost_ratio,
+        Q_p_tube=50000.0,   # v8_tuned: 走廊位置代价提升至终端 Q_p 的 50%
+        Q_v_tube=0.0,       # v8: 不惩罚走廊内速度方向
+        Q_n_tube=0.0,       # v8: 不惩罚走廊内法向量
+        tube_cost_ratio=1.0,
         softmin_beta=args.softmin_beta,
-        use_softmin_terminal=not args.no_softmin,
+        use_softmin_terminal=not args.no_softmin,  # v8: --no-softmin 只关闭 softmin 终端
     )
 
     # 初始化 RM-65 环境
@@ -2090,29 +2027,27 @@ def main() -> None:
     hit_direction = np.array(config_dict["hitting"]["hit_direction"], dtype=np.float64)
     racket_speed = float(config_dict["hitting"]["racket_speed"])
 
-    # ===== v4: 随挥方向 = 来球反方向 =====
-    d_follow = -v_ball_hit / (np.linalg.norm(v_ball_hit) + 1e-8)
-    d_hat = d_follow  # v4: 用来球反方向替代固定 hit_direction
+    # 击球方向：固定方向（YAML）或来球反方向（ball-reverse）
+    if args.fixed_direction:
+        d_follow = hit_direction / (np.linalg.norm(hit_direction) + 1e-8)
+    else:
+        d_follow = -v_ball_hit / (np.linalg.norm(v_ball_hit) + 1e-8)
+    d_hat = d_follow
 
-    # v4: 击球时刻期望速度 = TCP 限制
-    v_hit_at_contact = racket_speed * d_follow  # 1.8 m/s 沿来球反方向
+    # 终端速度：可通过 --target-speed 覆盖
+    v_hit_at_contact = args.target_speed * d_follow
 
-    # v4: 随挥管道参数
-    follow_through_length = float(config_dict["hitting"].get("follow_through_length", 0.4))
-    follow_through_steps = int(config_dict["hitting"].get("follow_through_steps", 40))
-    follow_through_v_terminal = float(config_dict["hitting"].get("follow_through_v_terminal", 0.3))
+    # 终端偏移：可通过 --hit-shift 覆盖
+    follow_through_length = args.hit_shift
+    follow_through_steps = 40
+    follow_through_v_terminal = 0.3
 
-    # v4: 终端目标点 = 击球点 + 小偏移（与 v2 相同）
-    p_follow = p_hit + 0.01 * d_follow
-    # v4: 终端速度 = 击球时刻期望速度（1.8 m/s），iLQR 在终端（=击打时刻）最大化此速度
-    v_hit_desired = v_hit_at_contact  # 1.8 m/s 沿来球反方向
+    # v6: 终端目标 = 击球点 + 偏移（arm 穿过击球点加速到终端）
+    p_follow = p_hit + follow_through_length * d_follow
+    # v6: 终端速度 = 1.8 m/s（可达！）
+    v_hit_desired = v_hit_at_contact
 
-    hit_shift = 0.01  # v4: 与 v2 相同，小偏移
-
-    # v4: 随挥管道参数（击打后 PD 控制）
-    follow_through_length = float(config_dict["hitting"].get("follow_through_length", 0.4))
-    follow_through_steps = int(config_dict["hitting"].get("follow_through_steps", 40))
-    follow_through_v_terminal = float(config_dict["hitting"].get("follow_through_v_terminal", 0.3))
+    hit_shift = follow_through_length
 
     # ===== 构建初始 Tube（若启用） =====
     hit_window: HitWindow | None = None
@@ -2140,26 +2075,33 @@ def main() -> None:
             use_tube = False
 
     logger.info(f"击打步数: {k_hit_total}, 击打位置: {p_hit}")
-    logger.info(f"[v5] 随挥方向(来球反方向): {np.round(d_follow, 3)}")
-    logger.info(f"[v5] 击球时刻期望速度: {racket_speed} m/s")
-    logger.info(f"[v5] 终端目标点: {np.round(p_follow, 3)}, 终端速度: {np.linalg.norm(v_hit_desired):.1f} m/s")
-    logger.info(f"[v5] 随挥距离: {follow_through_length:.2f}m, 随挥步数: {follow_through_steps}")
+    logger.info(f"[v6] 随挥方向(固定YAML): {np.round(d_follow, 3)}")
+    logger.info(f"[v6] 击球时刻期望速度: {np.linalg.norm(v_hit_at_contact):.1f} m/s (TCP limit)")
+    logger.info(f"[v6] 随挥距离: {follow_through_length:.2f}m, 随挥步数: {follow_through_steps}")
     logger.info(f"Tube 模式: {'启用' if use_tube else '禁用'}")
     logger.info(f"线性化: {'解析' if use_analytical else '有限差分'}, horizon={fixed_horizon}")
 
     # ===== 初始化 =====
     Q_p = np.array(config_dict["cost"]["Q_p"], dtype=np.float64) * 2.0
-    # v4: 方向对齐速度代价 — 只惩罚沿 d_follow 方向的速度偏差
-    # Q_v_scalar 远大于原始 Q_v，但只作用在 1 个方向上，等效应力 ≈ Q_v_scalar
-    Q_v_scalar = 10000.0  # v4: 方向对齐速度代价标量（远大于原始 400）
-    Q_v = Q_v_scalar * np.outer(d_follow, d_follow)  # (3,3) 秩1矩阵
-    logger.info(f"[v5] Q_v 方向对齐: scalar={Q_v_scalar}, d_follow={np.round(d_follow, 3)}")
-    logger.info(f"[v5] 终端 = 随挥终点: p_terminal={np.round(p_hit + follow_through_length * d_follow, 3)}, "
-                f"v_terminal={follow_through_v_terminal:.1f} m/s, horizon=+{follow_through_steps}步")
+    # v6: 满秩 Q_v（与 v2 一致），三维速度等权约束
+    # v4/v5/v6 用秩1 outer(d,d) 导致垂直方向无约束，v6 恢复满秩
+    Q_v = np.array(config_dict["cost"]["Q_v"], dtype=np.float64) * 2.0  # diag([400,400,400])
+    logger.info(f"[v6] Q_v 满秩: {np.diag(Q_v).tolist()}")
     R = float(config_dict["cost"]["R"])
     ilqt_cfg = dict(config_dict["ilqt"])
 
     p_target_init = p_follow
+
+    # v7: 终端目标 = 击球点 + 15cm 偏移（arm 穿过击球点）
+    # v2: p_hit + 0.01m, v5: p_hit + 0.5m, v6: p_hit + follow_through_length
+    p_terminal_init = p_follow
+    v_terminal_init = v_hit_desired
+    logger.info(
+        f"[v6] 终端 = 击球点+{follow_through_length}m偏移: "
+        f"p_terminal={np.round(p_terminal_init, 3)}, "
+        f"v_terminal={np.linalg.norm(v_terminal_init):.1f} m/s "
+        f"dir={np.round(d_follow, 3)}"
+    )
 
     if use_backswing:
         U_prev, q_des_traj_init = generate_backswing_warm_start(
@@ -2194,39 +2136,39 @@ def main() -> None:
         if use_r_decay else None
     )
 
-    # [v5] 创建基础代价函数 — 终端=p_follow（初始为击球点附近）
-    # 注意: 在 do_replan() 和 MPC 重规划中，终端会被更新为随挥终点 p_hit+0.5m
-    # 下面的 midpoint 是 v5 的核心改进: 在 k_hit 步强制经过 p_hit + 匹配速度
+    # v6: 创建基础代价函数（terminal = 击球点 + 击球速度）
     base_cost_fn = HittingCost(
-        env, p_follow, v_hit_desired, Q_p, Q_v, R,
+        env, p_terminal_init, v_terminal_init, Q_p, Q_v, R,
         Q_p_running=0.0,
         R_joint_scale=r_joint_scale if r_joint_scale else None,
         q_des_traj=q_des_traj_init,
-        Q_joint=Q_joint,
-        R_schedule=R_schedule_init,
-        Q_n=args.normal_weight,
-        n_des=n_des_single,
-        Q_qdot=float(config_dict["cost"].get("Q_qdot", 0.0)),
-        Q_qddot=float(config_dict["cost"].get("Q_qddot", 0.0)),
-        Q_du=float(config_dict["cost"].get("Q_du", 0.0)),
+         Q_joint=Q_joint,
+         R_schedule=R_schedule_init,
+         Q_n=args.normal_weight,
+         n_des=n_des_single,
+         Q_qdot=float(config_dict["cost"].get("Q_qdot", 0.0)),
+         Q_qddot=float(config_dict["cost"].get("Q_qddot", 0.0)),
+         Q_du=float(config_dict["cost"].get("Q_du", 0.0)),
     )
 
-    # v5: 初始中途目标 — 在 k_hit 步强制经过击球位置 + 鼓励高速
-    base_cost_fn.set_midpoint_target(k_hit_total, p_hit, Q_p * 2.0,
-                                     v_target=v_hit_at_contact,
-                                     Q_midpoint_v=Q_v * 5.0)
+    # v6: 不设 midpoint（与 v2 一致，避免梯度冲突）
+    # v8: Tube 走廊和 Softmin 终端代价解耦
+    # --no-tube: 不创建 TubeHittingCostWrapper（无走廊代价）
+    # --no-softmin: 创建 TubeHittingCostWrapper 但禁用 softmin 终端（只用走廊代价）
+    # 都不加: Tube 走廊 + softmin 终端全部启用
 
-    # 创建 Tube 代价包装器（若启用）
     tube_cost_fn: TubeHittingCostWrapper | None = None
     if use_tube and hitting_tube is not None:
         tube_cost_fn = TubeHittingCostWrapper(
             env, base_cost_fn, hitting_tube, k_hit_total, tube_cfg,
         )
         cost_fn = tube_cost_fn
-        logger.info("TubeHittingCostWrapper 已创建")
+        softmin_status = "启用" if not args.no_softmin else "禁用"
+        logger.info(f"[v8] TubeHittingCostWrapper 已创建（走廊=启用, softmin={softmin_status}）")
     else:
-        cost_fn = base_cost_fn  # type: ignore[assignment]
-        logger.info("使用标准 HittingCost（single-hit-point）")
+        cost_fn = base_cost_fn
+        tube_reason = "被 --no-tube 禁用" if not use_tube else "构建失败"
+        logger.info(f"[v8] 使用标准 HittingCost（Tube {tube_reason}）")
 
     # ===== 球速耦合扰动：沿飞行方向平移发球位置，保持初速度不变 =====
     # 正 pct: 发球点沿飞行方向前移 → 球提前到达 → 时间+空间耦合偏移
@@ -2308,11 +2250,13 @@ def main() -> None:
     iters = 0
     hit_step = -1
     p_ee_at_hit = None
+    v_ee_at_hit = None
     total_sleep_time = 0.0
     ball_pos_at_hit = None
     q_ik_cache: np.ndarray | None = None
     ball_was_hit = False
     follow_through_start = -1  # v4: 随挥开始步
+    k_hit_at_follow = 0  # v6: 记录随挥开始时的 k_hit（用于球轨迹回溯）
 
     buffer_exhaustion_count = 0
     current_n_des = n_des_single.copy()
@@ -2536,7 +2480,6 @@ def main() -> None:
         "v_hit_desired": v_hit_desired,
         "v_hit_at_contact": v_hit_at_contact,
         "d_follow": d_follow,
-        "Q_v_scalar": Q_v_scalar,
         "follow_through_length": follow_through_length,
         "follow_through_steps": follow_through_steps,
         "follow_through_v_terminal": follow_through_v_terminal,
@@ -2554,6 +2497,14 @@ def main() -> None:
         "smooth_far": far_stage,
         "smooth_mid": mid_stage,
         "smooth_near": near_stage,
+        # v6: 新增参数
+        "Q_tcp_soft": args.Q_tcp_soft,
+        "Q_qdot_limit": args.Q_qdot_limit,
+        "softmin_beta": args.softmin_beta,
+        "ball_positions_all": ball_positions_all,
+        "max_tcp_speed": float(args.max_tcp) if args.max_tcp and args.max_tcp > 0 else 1.8,
+        "no_v_maximize": args.no_v_maximize,
+        "normal_weight": args.normal_weight,
     }
     async_replanner = AsyncReplanner(env, do_replan, replan_cfg, state=replan_state, model_path=model_path)
     async_replanner.start()
@@ -2705,8 +2656,9 @@ def main() -> None:
                             current_n_des = result.n_des_new.copy()
                             n_des_new = current_n_des.copy()
                             p_follow_new = p_hit_new + hit_shift * d_hat
-                            p_terminal_async = p_hit_new + follow_through_length * d_hat
-                            v_terminal_async = follow_through_v_terminal * d_hat
+                            # v6: 终端 = 击球点 + 击球速度
+                            p_terminal_async = p_hit_new
+                            v_terminal_async = v_hit_at_contact
                             base_cost_fn.update_target(p_terminal_async, v_terminal_async, n_des=n_des_new)
                             replan_state.k_hit_new = k_hit_new
                             replan_state.p_hit_new = p_hit_new.copy()
@@ -2833,22 +2785,20 @@ def main() -> None:
 
                 k_hit_steps_history.append(k_hit_new)
 
-                # v5: 扩展 horizon 包含随挥段
-                horizon_full = k_hit_new + follow_through_steps
+                # v7: horizon 仅到击球时刻
+                horizon_full = k_hit_new
                 horizon_plan = min(horizon_full, fixed_horizon)
 
-                # v5: 终端目标 = 随挥终点
+                # v7: 终端 = 击球点 + 偏移（arm 穿过击球点）
                 p_terminal_v5 = p_hit_new + follow_through_length * d_hat
-                v_terminal_v5 = follow_through_v_terminal * d_hat
+                v_terminal_v5 = v_hit_at_contact
                 base_cost_fn.update_target(p_terminal_v5, v_terminal_v5, n_des=n_des_new)
 
-                # v5: 中途目标 — 在 k_hit 步强制经过击球位置 + 鼓励高速
-                if k_hit_new > 0 and k_hit_new < horizon_plan:
-                    base_cost_fn.set_midpoint_target(k_hit_new, p_hit_new, Q_p * 2.0,
-                                                     v_target=v_hit_at_contact,
-                                                     Q_midpoint_v=Q_v * 5.0)
+                # v6: 不设 midpoint（与 v2 一致，避免梯度冲突）
+                base_cost_fn.set_midpoint_target(None, None)
 
-                if use_tube and tube_cost_fn is not None:
+                # v8: 更新 Tube（解耦 softmin）
+                if use_tube:
                     hit_window = search_hit_window(
                         env, ball_pos, ball_vel, shoulder_pos, workspace_radius,
                         remaining_horizon, tube_cfg,
@@ -2861,13 +2811,15 @@ def main() -> None:
                         hitting_tube = build_hitting_tube(
                             hit_window, racket_speed, d_follow, tube_cfg,
                         )
-                        tube_cost_fn.update_hitting_tube(hitting_tube, horizon=horizon_plan)
-                        tube_cost_fn.update_target(p_terminal_v5, v_terminal_v5, n_des=n_des_new)
+                        tube_cost_fn_sync = TubeHittingCostWrapper(
+                            env, base_cost_fn, hitting_tube, k_hit_new, tube_cfg,
+                        )
+                        cost_fn = tube_cost_fn_sync
                     else:
-                        logger.info(f"步 {step}: Tube 构建失败")
-
-                # 求解器使用 tube_cost_fn（若启用）或 base_cost_fn
-                cost_fn = tube_cost_fn if (use_tube and tube_cost_fn is not None) else base_cost_fn
+                        cost_fn = base_cost_fn
+                        logger.info(f"步 {step}: Tube 构建失败，使用 base_cost")
+                else:
+                    cost_fn = base_cost_fn
 
                 if k_hit_new > far_threshold:
                     ball_pos_save_far, ball_vel_save_far = env.get_ball_state()
@@ -3064,25 +3016,17 @@ def main() -> None:
                         f"horizon={horizon_plan} t={t_replan_dur*1000:.0f}ms "
                         f"fp_limits={fp_limits is not None} fast_lin={fast_lin}"
                     )
-                    # 可解释性日志：softmin 权重和走廊 margin 摘要
-                    if (use_tube and tube_cost_fn is not None
-                            and len(tube_cost_fn._last_softmin_alphas) > 0):
-                        alphas = tube_cost_fn._last_softmin_alphas
-                        costs_s = tube_cost_fn._last_softmin_costs
+                    # 可解释性日志：softmin 权重摘要
+                    if (use_tube
+                            and base_cost_fn._softmin_alpha_cache is not None
+                            and len(base_cost_fn._softmin_alpha_cache) > 0):
+                        alphas = base_cost_fn._softmin_alpha_cache
+                        costs_s = base_cost_fn._softmin_costs_cache if base_cost_fn._softmin_costs_cache is not None else np.zeros(0)
                         dom_idx = int(np.argmax(alphas))
                         logger.info(
                             f"[Softmin] dominant_α={alphas[dom_idx]:.3f} "
                             f"cost={costs_s[dom_idx]:.1f} | "
                             f"top3: {', '.join(f'{a:.3f}' for a in sorted(alphas, reverse=True)[:3])}"
-                        )
-                    if (use_tube and tube_cost_fn is not None
-                            and len(tube_cost_fn._last_tube_margins) > 0):
-                        margins = np.array(list(tube_cost_fn._last_tube_margins.values()))
-                        n_active = int(np.sum(margins > 0))
-                        logger.info(
-                            f"[Corridor] margin: min={margins.min()*1000:.1f}mm "
-                            f"max={margins.max()*1000:.1f}mm "
-                            f"active={n_active}/{len(margins)} (hinge>0)"
                         )
 
         step_is_replan.append(bool(need_replan))
@@ -3237,8 +3181,9 @@ def main() -> None:
                             ball_racket_hit = True
                             ee_vel = env.get_ee_vel()
                             ee_speed = np.linalg.norm(ee_vel)
+                            v_ee_at_hit = ee_speed
                             ball_spd = np.linalg.norm(ball_vel)
-                            if ee_speed > 2.0:
+                            if ee_speed > 0.3:
                                 active_contact = True
                                 contact_type = "主动击球"
                             else:
@@ -3314,12 +3259,14 @@ def main() -> None:
         # v4: 碰撞后延迟几步再开始随挥（让碰撞物理完成）
         if ball_was_hit and follow_through_start < 0 and hit_step >= 0 and (step - hit_step) >= 3:
             follow_through_start = step
+            k_hit_at_follow = k_hit_new  # v6: 记录随挥时的 k_hit
             logger.info(f"步 {step}: 碰撞后开始随挥 ({follow_through_steps} 步)")
 
         # v4: 到达击打时刻后不 break，继续执行随挥段（只触发一次）
         if k_hit_new <= 1 and follow_through_start < 0:
             logger.info(f"步 {step}: 到达击打时刻，开始随挥 ({follow_through_steps} 步)")
             hit_step = step if hit_step < 0 else hit_step
+            k_hit_at_follow = k_hit_new  # v6: 记录随挥时的 k_hit
             env.update_kinematics()
             if p_ee_at_hit is None:
                 p_ee_at_hit = env.get_ee_pos().copy()
@@ -3329,18 +3276,16 @@ def main() -> None:
             follow_through_start = step
 
         # v4: 随挥段 — 使用 PD 控制沿 d_follow 方向匀减速
+        # v6: 随挥目标点回溯到球轨迹上的可达点
         if follow_through_start >= 0:
             dt_follow = step - follow_through_start
             if dt_follow < follow_through_steps:
-                # 匀减速轨迹：s(dt) = v_max * dt - 0.5 * a * dt^2
-                # a = v_max / T_follow（从 v_max 匀减到 0）
                 v_max_follow = np.linalg.norm(v_hit_at_contact)  # 1.8 m/s
                 T_follow = follow_through_steps * dt  # 总随挥时间（秒）
                 a_follow = v_max_follow / T_follow if T_follow > 0 else 0.0
                 t_elapsed = dt_follow * dt  # 已过时间（秒）
-                # 期望位置：从击球点沿 d_follow 移动
+                # v6: 随挥目标 = 沿击球方向匀减速直线延伸
                 p_des_follow = p_ee_at_hit + d_follow * (v_max_follow * t_elapsed - 0.5 * a_follow * t_elapsed ** 2)
-                # 期望速度：匀减速
                 v_des_follow = d_follow * max(v_max_follow - a_follow * t_elapsed, 0.0)
 
                 # 任务空间 PD + 雅可比转置映射到关节空间
@@ -3563,22 +3508,16 @@ def main() -> None:
         print("  RM-65 击打偏差较大，需要调整参数。")
 
     print(f"  Tube 模式: {'启用' if use_tube or hitting_tube is not None else '禁用'}")
-    # ---- v2 可解释性诊断 ----
-    if use_tube and tube_cost_fn is not None:
-        print(f"  --- v2 Tube 可解释性诊断 ---")
-        if len(tube_cost_fn._last_softmin_alphas) > 0:
-            alphas = tube_cost_fn._last_softmin_alphas
-            costs_s = tube_cost_fn._last_softmin_costs
-            print(f"  P0-2 Softmin终端: 候选数={len(alphas)}, beta={tube_cost_fn._softmin_beta:.1f}")
-            top_n = min(5, len(alphas))
-            top_idx = np.argsort(alphas)[::-1][:top_n]
-            for rank, i in enumerate(top_idx):
-                print(f"    #{rank+1}: α={alphas[i]:.4f}, cost={costs_s[i]:.1f}")
-        if len(tube_cost_fn._last_tube_margins) > 0:
-            margins = np.array(list(tube_cost_fn._last_tube_margins.values()))
-            n_active = int(np.sum(margins > 0))
-            print(f"  走廊激活: {n_active}/{len(margins)} 步 margin>0 (hinge激活) | "
-                  f"margin范围=[{margins.min()*1000:.1f}, {margins.max()*1000:.1f}]mm")
+    # v6: softmin 可解释性诊断（从 base_cost_fn 读取）
+    if use_tube and base_cost_fn._softmin_alpha_cache is not None and len(base_cost_fn._softmin_alpha_cache) > 0:
+        print(f"  --- v6 Softmin 诊断 ---")
+        alphas = base_cost_fn._softmin_alpha_cache
+        costs_s = base_cost_fn._softmin_costs_cache if base_cost_fn._softmin_costs_cache is not None else np.zeros(0)
+        print(f"  Softmin终端: 候选数={len(alphas)}, beta={args.softmin_beta:.1f}")
+        top_n = min(5, len(alphas))
+        top_idx = np.argsort(alphas)[::-1][:top_n]
+        for rank, i in enumerate(top_idx):
+            print(f"    #{rank+1}: α={alphas[i]:.4f}, cost={costs_s[i]:.1f}")
     if initial_tube_n_candidates > 0:
         print(f"  初始候选窗口: {initial_tube_n_candidates} 步 {initial_tube_k_range} "
               f"(半宽 {args.window_ms:.0f}ms)")
@@ -3656,11 +3595,15 @@ def main() -> None:
 
     # 结构化结果行（供批量实验脚本解析，固定英文格式）
     hit_type_en = "active" if active_contact else ("passive" if passive_contact else "miss")
+    v_racket_at_hit_val = v_ee_at_hit if v_ee_at_hit is not None else 0.0
     print(f"__RESULT__: pos_error={pos_error:.6f} vel_error={vel_error:.6f} "
           f"min_dist={min_dist:.6f} ball_near_ms={ball_near_ms:.1f} "
           f"tube_ready_ms={tube_ready_ms:.1f} max_tcp={exec_metrics.max_tcp_speed:.2f} "
-          f"max_qdot={exec_metrics.max_qdot_ratio:.2f} hit_type={hit_type_en} "
-          f"hit_time_error_ms={hit_time_error:.1f} hit_pos_error={hit_position_error:.6f}")
+          f"max_qdot={exec_metrics.max_qdot_ratio:.2f} "
+          f"max_face={exec_metrics.max_racket_face_speed:.1f} "
+          f"hit_type={hit_type_en} "
+          f"hit_time_error_ms={hit_time_error:.1f} hit_pos_error={hit_position_error:.6f} "
+          f"v_racket_at_hit={v_racket_at_hit_val:.3f}")
 
     # ===== 保存轨迹 =====
     if args.dump_trajectory:

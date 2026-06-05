@@ -34,6 +34,22 @@ class HittingCost:
         Q_qdot: float = 0.0,
         Q_qddot: float = 0.0,
         Q_du: float = 0.0,
+        # v6: softmin 多终端候选
+        softmin_candidates: np.ndarray | None = None,
+        softmin_beta: float = 5.0,
+        softmin_weights: np.ndarray | None = None,
+        # v6: 速度最大化（负代价）
+        maximize_v_at_midpoint: bool = False,
+        v_maximize_direction: np.ndarray | None = None,
+        Q_v_max: float = 5000.0,
+        Q_v_max_eps: float = 0.01,
+        # v6: TCP 速度软惩罚
+        Q_tcp_soft: float = 0.0,
+        tcp_threshold: float = 1.44,
+        max_tcp_speed: float = 1.8,
+        # v6: 关节速度阈值软惩罚
+        Q_qdot_limit: float = 0.0,
+        qdot_limit_thresholds: np.ndarray | None = None,
     ) -> None:
         """初始化代价函数。
 
@@ -59,6 +75,18 @@ class HittingCost:
             Q_qdot: 关节速度软平滑权重（0=禁用）。用于平滑轨迹而非安全保障。
             Q_qddot: 关节加速度软平滑权重（0=禁用）。θ̈ ≈ θ̇/dt。
             Q_du: 控制变化率软平滑权重（0=禁用）。||u_k - u_{k-1}||²。
+            softmin_candidates: v6 多终端候选球位置，形状 (M, 3)。None 表示使用单一 p_hit。
+            softmin_beta: v6 softmin 温度参数，值越大越接近 hard min。
+            softmin_weights: v6 高斯权重，形状 (M,)。None 表示均匀权重。
+            maximize_v_at_midpoint: v6 是否在中途步最大化速度（负线性代价）。
+            v_maximize_direction: v6 速度最大化方向，形状 (3,)。
+            Q_v_max: v6 速度最大化线性代价权重。
+            Q_v_max_eps: v6 速度最大化二次正则化系数（防止无界速度）。
+            Q_tcp_soft: v6 TCP 速度软惩罚权重（0=禁用）。
+            tcp_threshold: v6 TCP 速度阈值（超过此值开始惩罚）。
+            max_tcp_speed: v6 TCP 最大允许速度（用于导数归一化）。
+            Q_qdot_limit: v6 关节速度阈值软惩罚权重（0=禁用）。
+            qdot_limit_thresholds: v6 各关节速度阈值，形状 (6,)。超过此值开始惩罚。
         """
         self.env = env
         self.p_hit = p_hit.copy()
@@ -132,6 +160,34 @@ class HittingCost:
         # v5: 中途速度目标（在 k_hit 步鼓励高速）
         self._midpoint_v_target: np.ndarray | None = None
         self._Q_midpoint_v: np.ndarray | None = None
+        # v6: softmin 多终端候选
+        self._softmin_candidates: np.ndarray | None = (
+            softmin_candidates.copy() if softmin_candidates is not None else None
+        )
+        self._softmin_beta: float = softmin_beta
+        self._softmin_weights: np.ndarray | None = (
+            softmin_weights.copy() if softmin_weights is not None else None
+        )
+        self._softmin_v_des: np.ndarray | None = None
+        self._softmin_n_des: np.ndarray | None = None
+        self._softmin_alpha_cache: np.ndarray | None = None
+        self._softmin_costs_cache: np.ndarray | None = None
+        # v6: 速度最大化（负代价）
+        self._maximize_v_at_midpoint: bool = maximize_v_at_midpoint
+        self._v_maximize_direction: np.ndarray | None = (
+            v_maximize_direction.copy() if v_maximize_direction is not None else None
+        )
+        self._Q_v_max: float = Q_v_max
+        self._Q_v_max_eps: float = Q_v_max_eps
+        # v6: TCP 速度软惩罚
+        self._Q_tcp_soft: float = max(0.0, Q_tcp_soft)
+        self._tcp_threshold: float = tcp_threshold
+        self._max_tcp_speed: float = max_tcp_speed
+        # v6: 关节速度阈值软惩罚
+        self._Q_qdot_limit: float = max(0.0, Q_qdot_limit)
+        self._qdot_limit_thresholds: np.ndarray | None = (
+            qdot_limit_thresholds.copy() if qdot_limit_thresholds is not None else None
+        )
         # 组合权重
         self._rebuild_combined_weight()
 
@@ -246,6 +302,35 @@ class HittingCost:
         self._Q_qddot_effective = self._Q_qddot * qddot_scale
         self._Q_du_effective = self._Q_du * du_scale
 
+    def set_softmin_candidates(
+        self,
+        candidates: np.ndarray | None,
+        v_des_candidates: np.ndarray | None = None,
+        n_des_candidates: np.ndarray | None = None,
+        weights: np.ndarray | None = None,
+        beta: float | None = None,
+    ) -> None:
+        """动态更新 softmin 候选（重规划时调用）。
+
+        每个候选拥有独立的位置、期望速度和期望法向量，
+        softmin 在三维（位置+速度+法向量）上进行匹配。
+
+        Args:
+            candidates: 候选球位置，形状 (M, 3)。None 表示清除 softmin。
+            v_des_candidates: 每候选的期望击球速度，形状 (M, 3)。
+                None 表示所有候选共享 self.v_hit。
+            n_des_candidates: 每候选的期望拍面法向量，形状 (M, 3)。
+                None 表示所有候选共享 self.n_des。
+            weights: 高斯权重，形状 (M,)。None 表示均匀权重。
+            beta: softmin 温度参数。None 表示保持不变。
+        """
+        self._softmin_candidates = candidates.copy() if candidates is not None else None
+        self._softmin_v_des = v_des_candidates.copy() if v_des_candidates is not None else None
+        self._softmin_n_des = n_des_candidates.copy() if n_des_candidates is not None else None
+        self._softmin_weights = weights.copy() if weights is not None else None
+        if beta is not None:
+            self._softmin_beta = beta
+
     def update_target(
         self,
         p_hit: np.ndarray,
@@ -293,6 +378,7 @@ class HittingCost:
             self._Q_p_running is not None
             or self._body_enabled
             or self._x_limit_enabled
+            or self._Q_tcp_soft > 0
         )
         if need_fk:
             self.env.set_arm_state(x)
@@ -320,16 +406,39 @@ class HittingCost:
         cost += self._add_x_limit_cost(x, skip_set_state=True)
         # 软平滑项
         cost += self._add_smoothness_cost(x, u, k)
-        # v5: 中途位置代价（在指定步强制经过击球位置）
-        if (k is not None and self._midpoint_step is not None
-                and k == self._midpoint_step and self._midpoint_target is not None):
-            if not need_fk:
+        # v6: TCP 速度软惩罚
+        if self._Q_tcp_soft > 0:
+            J_p_tcp = self.env.get_ee_jacp()[:, :self.env.NQ]
+            tcp_vel = J_p_tcp @ x[self.env.NQ:]
+            tcp_speed = float(np.linalg.norm(tcp_vel))
+            if tcp_speed > self._tcp_threshold:
+                excess = tcp_speed - self._tcp_threshold
+                cost += 0.5 * self._Q_tcp_soft * excess * excess
+        # v6: 关节速度阈值软惩罚
+        if self._Q_qdot_limit > 0 and self._qdot_limit_thresholds is not None:
+            qdot = x[self.env.NQ:]
+            for j in range(self.env.NQ):
+                excess = max(0.0, abs(qdot[j]) - self._qdot_limit_thresholds[j])
+                if excess > 0:
+                    cost += 0.5 * self._Q_qdot_limit * excess * excess
+        # v5: 中途位置代价（v6: 支持速度最大化模式）
+        is_midpoint = (k is not None and self._midpoint_step is not None
+                       and k == self._midpoint_step)
+        if is_midpoint:
+            need_midpoint_fk = (self._midpoint_target is not None
+                                or self._maximize_v_at_midpoint
+                                or self._midpoint_v_target is not None)
+            if need_midpoint_fk and not need_fk:
                 self.env.set_arm_state(x)
-            p_ee = self.env.get_ee_pos()
-            dp = p_ee - self._midpoint_target
-            cost += 0.5 * float(dp @ self._Q_midpoint @ dp)
-            # v5: 中途速度代价
-            if self._midpoint_v_target is not None:
+            if self._midpoint_target is not None:
+                p_ee = self.env.get_ee_pos()
+                dp = p_ee - self._midpoint_target
+                cost += 0.5 * float(dp @ self._Q_midpoint @ dp)
+            if self._maximize_v_at_midpoint and self._v_maximize_direction is not None:
+                v_ee = self.env.get_ee_vel()
+                cost += -self._Q_v_max * np.dot(v_ee, self._v_maximize_direction)
+                cost += 0.5 * self._Q_v_max_eps * np.dot(v_ee, v_ee)
+            elif self._midpoint_v_target is not None:
                 v_ee = self.env.get_ee_vel()
                 dv = v_ee - self._midpoint_v_target
                 cost += 0.5 * float(dv @ self._Q_midpoint_v @ dv)
@@ -338,8 +447,10 @@ class HittingCost:
     def terminal_cost(self, x: np.ndarray) -> float:
         """计算终端代价 l_N(x)。
 
-        l_N = 0.5*(h(x)-h_des)^T Q_h (h(x)-h_des) + 0.5*Q_n*(1-(n·n_des)²)
-         其中 h(x)=[p_ee; v_ee]，n 为拍面法向量。
+        当 softmin 候选启用时，使用 softmin 聚合多候选代价：
+            cost = -log(Σ w_i * exp(-β * c_i)) / β
+        其中 c_i = 0.5*||p-p_i||²_Qp + 0.5*||v-v_i||²_Qv + 0.5*Q_n*||n-n_i||²。
+        每个候选拥有独立的位置、期望速度和期望法向量。
 
         Args:
             x: 臂状态，形状 (12,)。
@@ -348,6 +459,29 @@ class HittingCost:
             终端代价值。
         """
         self.env.set_arm_state(x)
+        # softmin 多终端候选（per-candidate v/n）
+        if self._softmin_candidates is not None and len(self._softmin_candidates) > 1:
+            p_ee = self.env.get_ee_pos()
+            v_ee = self.env.get_ee_vel()
+            n_rack = self._compute_n_no_set(x) if (self.Q_n > 0 and self._softmin_n_des is not None) else None
+            M = len(self._softmin_candidates)
+            costs_i = np.zeros(M)
+            for i in range(M):
+                dp = p_ee - self._softmin_candidates[i]
+                v_des_i = self._softmin_v_des[i] if self._softmin_v_des is not None else self.v_hit
+                dv = v_ee - v_des_i
+                costs_i[i] = 0.5 * dp @ self.Q_p @ dp + 0.5 * dv @ self.Q_v @ dv
+                if self.Q_n > 0 and self._softmin_n_des is not None:
+                    n_err = n_rack - self._softmin_n_des[i]
+                    costs_i[i] += 0.5 * self.Q_n * float(n_err @ n_err)
+            w = self._softmin_weights if self._softmin_weights is not None else np.ones(M) / M
+            beta = self._softmin_beta
+            neg_beta_ci = -beta * costs_i
+            m = np.max(neg_beta_ci)
+            log_sum = m + np.log(np.sum(w * np.exp(neg_beta_ci - m)))
+            cost = -log_sum / beta
+            return cost
+        # 原有单一目标终端代价
         h = self._compute_h_no_set(x)
         diff = h - self.h_des
         cost = 0.5 * diff @ self.Q_h @ diff
@@ -381,6 +515,7 @@ class HittingCost:
             self._Q_p_running is not None
             or self._body_enabled
             or self._x_limit_enabled
+            or self._Q_tcp_soft > 0
         )
         if need_fk:
             self.env.set_arm_state(x)
@@ -437,21 +572,57 @@ class HittingCost:
         self._add_x_limit_derivatives(x, l_x, l_xx, skip_set_state=True)
         # 软平滑项
         self._add_smoothness_derivatives(x, u, k, l_x, l_u, l_xx, l_uu)
-
-        # v5: 中途位置+速度代价导数
-        if (k is not None and self._midpoint_step is not None
-                and k == self._midpoint_step and self._midpoint_target is not None):
+        # v6: TCP 速度软惩罚导数
+        if self._Q_tcp_soft > 0:
+            J_p_tcp = self.env.get_ee_jacp()[:, :self.env.NQ]
+            tcp_vel = J_p_tcp @ x[self.env.NQ:]
+            tcp_speed = float(np.linalg.norm(tcp_vel))
+            if tcp_speed > self._tcp_threshold:
+                excess = tcp_speed - self._tcp_threshold
+                if tcp_speed > 1e-8:
+                    grad_speed = tcp_vel / tcp_speed
+                    nq = self.env.NQ
+                    l_x[nq:] += self._Q_tcp_soft * excess * (J_p_tcp.T @ grad_speed)
+                    H_tcp = self._Q_tcp_soft * np.outer(grad_speed, grad_speed) / tcp_speed
+                    l_xx[nq:, nq:] += J_p_tcp.T @ H_tcp @ J_p_tcp
+        # v6: 关节速度阈值软惩罚导数
+        if self._Q_qdot_limit > 0 and self._qdot_limit_thresholds is not None:
             nq = self.env.NQ
-            if not need_fk:
+            qdot = x[nq:]
+            for j in range(nq):
+                excess = max(0.0, abs(qdot[j]) - self._qdot_limit_thresholds[j])
+                if excess > 0:
+                    sign = 1.0 if qdot[j] >= 0 else -1.0
+                    l_x[nq + j] += self._Q_qdot_limit * excess * sign
+                    l_xx[nq + j, nq + j] += self._Q_qdot_limit
+
+        # v5: 中途位置+速度代价导数（v6: 支持速度最大化模式）
+        is_midpoint = (k is not None and self._midpoint_step is not None
+                       and k == self._midpoint_step)
+        if is_midpoint:
+            nq = self.env.NQ
+            need_midpoint_fk = (self._midpoint_target is not None
+                                or self._maximize_v_at_midpoint
+                                or self._midpoint_v_target is not None)
+            if need_midpoint_fk and not need_fk:
                 self.env.set_arm_state(x)
-            p_ee = self.env.get_ee_pos()
-            J_p = self.env.get_ee_jacp()
-            dp = p_ee - self._midpoint_target
-            Q_mid = self._Q_midpoint
-            l_x[:nq] += J_p.T @ (Q_mid @ dp)
-            l_xx[:nq, :nq] += J_p.T @ Q_mid @ J_p
-            # v5: 中途速度代价导数
-            if self._midpoint_v_target is not None:
+            # 位置代价导数
+            if self._midpoint_target is not None:
+                J_p = self.env.get_ee_jacp()
+                p_ee = self.env.get_ee_pos()
+                dp = p_ee - self._midpoint_target
+                Q_mid = self._Q_midpoint
+                l_x[:nq] += J_p.T @ (Q_mid @ dp)
+                l_xx[:nq, :nq] += J_p.T @ Q_mid @ J_p
+            # 速度代价导数（v6: 最大化模式 vs 跟踪模式）
+            if self._maximize_v_at_midpoint and self._v_maximize_direction is not None:
+                J_p = self.env.get_ee_jacp()
+                d_follow = self._v_maximize_direction
+                l_x[nq:] += -self._Q_v_max * (J_p[:, :nq].T @ d_follow)
+                l_x[nq:] += self._Q_v_max_eps * (J_p[:, :nq].T @ J_p[:, :nq] @ x[nq:])
+                l_xx[nq:, nq:] += self._Q_v_max_eps * (J_p[:, :nq].T @ J_p[:, :nq])
+            elif self._midpoint_v_target is not None:
+                J_p = self.env.get_ee_jacp()
                 v_ee = self.env.get_ee_vel()
                 dv = v_ee - self._midpoint_v_target
                 Q_mid_v = self._Q_midpoint_v
@@ -465,12 +636,59 @@ class HittingCost:
     ) -> tuple[np.ndarray, np.ndarray]:
         """计算终端代价的一阶和二阶导数（Gauss-Newton 近似）。
 
+        当 softmin 候选启用时，使用加权平均导数：
+            l_x = Σ α_i * (J_h^T @ Q_h @ diff_i + Q_n * J_n^T @ n_err_i)
+            l_xx = Σ α_i * (J_h^T @ Q_h @ J_h + Q_n * J_n^T @ J_n)
+                   = J_h^T @ Q_h @ J_h + Q_n * J_n^T @ J_h（Σα_i=1）
+        其中 α_i = w_i * exp(-β*c_i) / Σ_j w_j * exp(-β*c_j)，
+        diff_i = [p_ee - p_i; v_ee - v_des_i]，n_err_i = n - n_des_i。
+
         Returns:
             (l_x_N, l_xx_N)。
         """
-        # 统一设置一次 arm state
         self.env.set_arm_state(x)
 
+        # softmin 多终端候选导数（per-candidate v/n）
+        if self._softmin_candidates is not None and len(self._softmin_candidates) > 1:
+            p_ee = self.env.get_ee_pos()
+            v_ee = self.env.get_ee_vel()
+            h = np.concatenate([p_ee, v_ee])
+            J_h = self._compute_jacobian_h_no_set(x)
+            n_rack = self._compute_n_no_set(x) if (self.Q_n > 0 and self._softmin_n_des is not None) else None
+            J_n = self._compute_jacobian_n_no_set(x) if (self.Q_n > 0 and self._softmin_n_des is not None) else None
+            M = len(self._softmin_candidates)
+            costs_i = np.zeros(M)
+            diffs_i = np.zeros((M, 6))
+            for i in range(M):
+                v_des_i = self._softmin_v_des[i] if self._softmin_v_des is not None else self.v_hit
+                h_des_i = np.concatenate([self._softmin_candidates[i], v_des_i])
+                diff_i = h - h_des_i
+                diffs_i[i] = diff_i
+                costs_i[i] = 0.5 * diff_i @ self.Q_h @ diff_i
+                if self.Q_n > 0 and self._softmin_n_des is not None:
+                    n_err_i = n_rack - self._softmin_n_des[i]
+                    costs_i[i] += 0.5 * self.Q_n * float(n_err_i @ n_err_i)
+            w = self._softmin_weights if self._softmin_weights is not None else np.ones(M) / M
+            beta = self._softmin_beta
+            neg_beta_ci = -beta * costs_i
+            m = np.max(neg_beta_ci)
+            exp_vals = w * np.exp(neg_beta_ci - m)
+            alpha = exp_vals / np.sum(exp_vals)
+            # 缓存诊断信息
+            self._softmin_alpha_cache = alpha.copy()
+            self._softmin_costs_cache = costs_i.copy()
+            # 加权梯度（位置+速度）
+            weighted_diff = np.sum(alpha[:, None] * diffs_i, axis=0)
+            l_x = J_h.T @ self.Q_h @ weighted_diff
+            l_xx = J_h.T @ self.Q_h @ J_h
+            # 拍面法向量代价导数（per-candidate，按 alpha 加权）
+            if self.Q_n > 0 and self._softmin_n_des is not None and J_n is not None:
+                weighted_n_err = np.sum(alpha[:, None] * (n_rack[None, :] - self._softmin_n_des), axis=0)
+                l_x += self.Q_n * (J_n.T @ weighted_n_err)
+                l_xx += self.Q_n * (J_n.T @ J_n)
+            return l_x, l_xx
+
+        # 原有单一目标终端导数
         h = self._compute_h_no_set(x)
         J_h = self._compute_jacobian_h_no_set(x)
         diff = h - self.h_des
@@ -478,9 +696,6 @@ class HittingCost:
         l_x = J_h.T @ self.Q_h @ diff
         l_xx = J_h.T @ self.Q_h @ J_h
 
-        # 拍面法向量代价：J = 0.5*Q_n*||n - n_des||²
-        # ∂J/∂x = Q_n * J_n^T @ (n - n_des)
-        # ∂²J/∂x² ≈ Q_n * J_n^T @ J_n  (Gauss-Newton)
         if self.n_des is not None and self.Q_n > 0:
             n = self._compute_n_no_set(x)
             J_n = self._compute_jacobian_n_no_set(x)

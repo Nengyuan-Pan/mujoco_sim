@@ -9,6 +9,47 @@
   若任何 body 越过身体中线 X=0，立即用 PD 控制推回安全位形一步。
   不依赖代价函数软惩罚 —— 直接在物理层面阻止越界。
 
+=== 版本差异说明 ===
+
+v2 (本文件) — 基础版本，softmin + TubeHittingCostWrapper
+  - 击球方向: 固定方向，来自 config YAML（hit_direction: [0, -1, 0.3]）
+  - 终端目标: p_hit + 0.01*d_hat（击球点附近微小偏移）
+  - Q_v: 满秩对角矩阵 diag([400, 400, 400])，各方向等权
+  - Midpoint: 无。仅靠终端代价引导到击球点
+  - 随挥: 无。击球后立即 break 退出循环
+  - 消融实验结果: softmin_only = 96%（全程硬约束 exempt=0）
+  - 击球时 TCP 速度: ≈0 m/s（arm 在终端目标处趋于静止）
+
+v4 — v2 + 来球方向自适应 + PD 随挥
+  - 击球方向: 来球反方向 d_follow = -v_ball_hit / ||v_ball_hit||（动态）
+  - 终端目标: p_hit + 0.01*d_follow（与 v2 类似）
+  - Q_v: 秩1矩阵 10000 * outer(d_follow, d_follow)，仅约束沿击球方向速度
+  - Midpoint: 无
+  - 随挥: PD 控制器，40步匀减速，沿 d_follow 直线延伸
+  - 新增: 加载 v4_follow_through.yaml 配置
+  - 未做大规模消融实验
+
+v5 — v2 + 来球方向自适应 + Midpoint + PD 随挥 + 扩展 horizon
+  - 击球方向: 来球反方向（与 v4 相同）
+  - 终端目标: p_hit + 0.4~0.5m*d_hat（随挥终点！不是击球点）
+  - 终端速度: 0.3 m/s（低速，鼓励 arm 减速到随挥终点）
+  - Q_v: 秩1矩阵（与 v4 相同）
+  - Midpoint: 有！在 k_hit 步强制经过 p_hit + v_hit_at_contact
+    权重: Q_midpoint = Q_p * 2, Q_midpoint_v = Q_v * 5
+    条件: k_hit < horizon_plan 时激活（近阶段生效）
+  - 随挥: PD 控制器 + 扩展 total_horizon + 碰撞触发
+  - TubeHittingCostWrapper: 包装带 midpoint 的 base_cost_fn
+  - 消融实验结果: softmin_only = 96%（与 v2 相同，因为 midpoint 在远阶段不激活）
+  - 击球时 TCP 速度: ≈0 m/s（终端指向随挥终点，但 TCP 限速 1.8m/s 限制实际速度）
+
+=== 关键架构对比 ===
+
+              击球方向    终端目标          Q_v         Midpoint  随挥
+  v2          固定YAML    p_hit+0.01m      满秩[400]   无        无
+  v4          来球反向    p_hit+0.01m      秩1[10000]  无        PD控制器
+  v5          来球反向    p_hit+0.5m(随挥) 秩1[10000]  有(k_hit) PD+碰撞触发
+  v6(开发中)  来球反向    p_hit(击球点)    秩1[10000]  可选      PD控制器
+
 用法:
   python scripts/rm65_mpc_tube_constraint_realtime_v2.py --serve-box --ball-speed 12 --viewer
   python scripts/rm65_mpc_tube_constraint_realtime_v2.py --serve-box --ball-speed 15 --viewer
@@ -2026,12 +2067,17 @@ def main() -> None:
     near_threshold = max(50, k_hit_total // 3)
     far_threshold = 50  # 实时模式：远段用 JT 控制（0ms），仅近段用 iLQR
 
+    # [v2特有] 击球方向: 固定方向来自 YAML 配置
+    # v4/v5 改为: d_follow = -v_ball_hit / ||v_ball_hit||（来球反方向，自适应）
     hit_direction = np.array(config_dict["hitting"]["hit_direction"], dtype=np.float64)
     racket_speed = float(config_dict["hitting"]["racket_speed"])
     v_hit_desired = compute_desired_hit_velocity(hit_direction, racket_speed)
 
     hit_shift = args.hit_shift
     d_hat = hit_direction / (np.linalg.norm(hit_direction) + 1e-8)
+    # [v2特有] 终端目标 = 击球点 + 微小偏移 (~0.01m)
+    # v4: p_follow = p_hit + 0.01 * d_follow（同样微小偏移）
+    # v5: 终端 = p_hit + 0.5m * d_hat（随挥终点，远离击球点！）
     p_follow = p_hit + hit_shift * d_hat
 
     # ===== 构建初始 Tube（若启用） =====
@@ -2067,6 +2113,8 @@ def main() -> None:
 
     # ===== 初始化 =====
     Q_p = np.array(config_dict["cost"]["Q_p"], dtype=np.float64) * 2.0
+    # [v2特有] Q_v = 满秩对角矩阵 diag([400, 400, 400])，各方向等权
+    # v4/v5 改为: Q_v = 10000 * outer(d_follow, d_follow)（秩1，仅约束击球方向）
     Q_v = np.array(config_dict["cost"]["Q_v"], dtype=np.float64) * 2.0
     R = float(config_dict["cost"]["R"])
     ilqt_cfg = dict(config_dict["ilqt"])
@@ -2106,7 +2154,9 @@ def main() -> None:
         if use_r_decay else None
     )
 
-    # 创建基础代价函数（无软约束，硬约束在执行层处理）
+    # [v2特有] 创建基础代价函数 — 终端=p_follow(击球点附近), 无 midpoint
+    # v4: 同样结构，但 Q_v 为秩1，v_hit_desired 沿来球反方向
+    # v5: 终端=p_follow，但紧接着会设 midpoint + 在 replan 中终端改为随挥终点
     base_cost_fn = HittingCost(
         env, p_follow, v_hit_desired, Q_p, Q_v, R,
         Q_p_running=0.0,

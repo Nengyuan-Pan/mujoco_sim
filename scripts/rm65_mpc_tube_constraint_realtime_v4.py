@@ -1,16 +1,39 @@
-"""RM-65 Tube-based Robust Hitting + 右臂硬半空间约束 实验脚本（V2 改进版）。
+"""RM-65 Tube-based Robust Hitting + 右臂硬半空间约束 实验脚本（V4）。
 
-基于 rm65_mpc_tube_constraint_realtime.py 的 Softmin 终端改进：
-  Softmin 多终端代价 — 允许在多个候选时刻之一击球，时间/空间鲁棒性大幅提升
-  （经消融实验验证：per-step sigma 走廊贡献为零，已移除）
+=== V4 相对 V2 的改进 ===
 
-在 rm65_mpc_tube.py 基础上新增执行层硬约束：
-  每步执行后检查 r_link3 (肘)、r_link5 (腕)、r_racket_body (球拍) 的 X 坐标。
-  若任何 body 越过身体中线 X=0，立即用 PD 控制推回安全位形一步。
-  不依赖代价函数软惩罚 —— 直接在物理层面阻止越界。
+1. 来球方向自适应击球:
+   v2 使用固定 hit_direction（来自 YAML），v4 改为 d_follow = -v_ball_hit/||v_ball_hit||，
+   即来球反方向。这让球拍自动朝向球飞来的方向，无需手动调参。
+
+2. 方向对齐速度代价（Q_v 秩1矩阵）:
+   v2 Q_v = diag([400, 400, 400])（满秩，各方向等权）
+   v4 Q_v = 10000 * outer(d_follow, d_follow)（秩1，仅惩罚沿击球方向的速度误差）
+   等效：击球方向权重增大 25x，但垂直方向完全放松，允许臂以任意姿态接近击球点。
+
+3. PD 随挥控制器:
+   v2 击球后立即 break，arm 急停。v4 新增 40 步 PD 随挥：
+   沿 d_follow 方向匀减速直线运动，Kp=200, Kd=20，同时维持 TCP 限速。
+   触发条件: k_hit_new <= 1（规划到达击球时刻）。
+
+4. 独立配置文件:
+   加载 configs/v4_follow_through.yaml，包含随挥参数（步数、距离、终端速度）。
+
+=== 与 V5 的差异 ===
+v5 在 v4 基础上额外增加:
+  - Midpoint 机制: 在 k_hit 步强制经过 p_hit，权重 Q_p*2 + Q_v*5
+  - 终端目标改为随挥终点（p_hit + 0.5m），而非击球点附近
+  - 扩展 total_horizon 包含随挥段
+  - 碰撞检测触发随挥（不仅仅是 k_hit <= 1）
+
+=== 版本架构对比 ===
+
+              击球方向    终端目标          Q_v         Midpoint  随挥
+  v2          固定YAML    p_hit+0.01m      满秩[400]   无        无
+  v4(本文件)  来球反向    p_hit+0.01m      秩1[10000]  无        PD控制器
+  v5          来球反向    p_hit+0.5m(随挥) 秩1[10000]  有(k_hit) PD+碰撞触发
 
 用法:
-  python scripts/rm65_mpc_tube_constraint_realtime_v4.py --serve-box --ball-speed 8 --viewer
   python scripts/rm65_mpc_tube_constraint_realtime_v4.py --serve-box --ball-speed 8 --viewer
   python scripts/rm65_mpc_tube_constraint_realtime_v4.py --use_tube false --viewer --seed 42
 """
@@ -2139,7 +2162,9 @@ def main() -> None:
         if use_r_decay else None
     )
 
-    # 创建基础代价函数（无软约束，硬约束在执行层处理）
+    # [v4] 创建基础代价函数 — 终端=p_follow(击球点附近), 无 midpoint
+    # 与 v2 的区别: Q_v 为秩1，v_hit_desired 沿来球反方向
+    # v5 会在此之后额外设置 midpoint_target + 将终端改为随挥终点
     base_cost_fn = HittingCost(
         env, p_follow, v_hit_desired, Q_p, Q_v, R,
         Q_p_running=0.0,
