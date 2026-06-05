@@ -68,6 +68,41 @@ def _noisy_get_ball_state(self) -> tuple[np.ndarray, np.ndarray]:
 RM65Env.get_ball_state = _noisy_get_ball_state  # type: ignore[method-assign]
 
 # ============================================================
+# 补充 patch: get_ball_pos 和 get_ball_vel 也加噪声
+# refine_hit_point 内部用 get_ball_pos/vel 做 Tube 搜索，
+# 若不 patch，安全模块看到无噪轨迹，会反复用无噪轨迹的
+# 安全点覆盖噪声轨迹选出的 k_hit → k_hit 锁死不递减
+# ============================================================
+_orig_get_ball_pos = RM65Env.get_ball_pos
+_orig_get_ball_vel = RM65Env.get_ball_vel
+
+
+def _noisy_get_ball_pos(self):
+    pos = _orig_get_ball_pos(self)
+    if _NOISE_RNG is not None:
+        pos, _ = add_observation_noise(
+            pos, np.zeros(3), _NOISE_RNG,
+            pos_std=_NOISE_POS_STD, vel_std=0.0,
+            pos_std_xyz=_NOISE_POS_XYZ, vel_std_xyz=None,
+        )
+    return pos
+
+
+def _noisy_get_ball_vel(self):
+    vel = _orig_get_ball_vel(self)
+    if _NOISE_RNG is not None:
+        _, vel = add_observation_noise(
+            np.zeros(3), vel, _NOISE_RNG,
+            pos_std=0.0, vel_std=_NOISE_VEL_STD,
+            pos_std_xyz=None, vel_std_xyz=_NOISE_VEL_XYZ,
+        )
+    return vel
+
+
+RM65Env.get_ball_pos = _noisy_get_ball_pos  # type: ignore[method-assign]
+RM65Env.get_ball_vel = _noisy_get_ball_vel  # type: ignore[method-assign]
+
+# ============================================================
 # Monkey-patch RobotLimits: 速度豁免（与 exp1 一致）
 # ============================================================
 from src.ilqt.robot_limits import RobotLimits            # noqa: E402
