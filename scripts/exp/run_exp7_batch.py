@@ -18,7 +18,7 @@ RAW_DIR = PROJECT_ROOT / "experiment_data" / "exp7_noise_tube_ablation" / "raw"
 WRAPPER = PROJECT_ROOT / "scripts" / "exp" / "_run_exp7_noise.py"
 PYTHON_EXE = str(Path(sys.executable))
 
-SPEEDS = [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+SPEEDS = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
 SEEDS = list(range(50))
 TUBE_MODES = ["true", "false"]
 NOISE_MODES = ["off", "lo", "mid", "hi", "anis"]
