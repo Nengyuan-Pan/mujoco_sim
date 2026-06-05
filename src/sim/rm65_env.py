@@ -79,6 +79,8 @@ class RM65Env:
         self.data.qvel[: self.NQ] = 0.0
         self._set_ball_pos_vel(np.array([5.0, 0.0, 2.0]), np.zeros(3))
         mujoco.mj_forward(self.model, self.data)
+        if self._estimator is not None:
+            self._estimator.reset()
         return self.get_arm_state()
 
     def get_arm_state(self) -> np.ndarray:

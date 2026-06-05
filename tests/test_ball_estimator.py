@@ -5,8 +5,17 @@ from pathlib import Path
 
 from src.sim.rm65_env import RM65Env
 from src.perception.ball_estimator import BallEstimator
+from src.perception import BallEstimator as BallEstimatorTopLevel
 
 MODEL_PATH = Path(__file__).parent.parent / "src" / "robot" / "rm65_model.xml"
+
+
+class TestPublicImport:
+    """感知模块顶层导出。"""
+
+    def test_top_level_import(self) -> None:
+        """from src.perception import BallEstimator 可用且等价。"""
+        assert BallEstimatorTopLevel is BallEstimator
 
 
 class TestBackwardCompatNoEstimator:
@@ -219,6 +228,18 @@ class TestRM65EnvIntegration:
         env = RM65Env(MODEL_PATH, dt=0.005, estimator=est)
         assert env._estimator is est
 
+    def test_reset_clears_estimator_state(self) -> None:
+        """env.reset() 后 estimator 回到未初始化状态，P 恢复初始值。"""
+        est = BallEstimator(dt=0.005, pos_noise_std=0.02, vel_noise_std=0.1)
+        env = RM65Env(MODEL_PATH, dt=0.005, estimator=est)
+        env.reset()
+        _ = env.get_ball_state()
+        assert est._initialized is True
+
+        env.reset()
+        assert est._initialized is False
+        np.testing.assert_allclose(est.covariance, np.eye(6) * 100.0)
+
 
 class TestBallEstimatorDynamicR:
     """BallEstimator 动态观测噪声参数。"""
@@ -227,18 +248,24 @@ class TestBallEstimatorDynamicR:
         """缩小噪声参数后协方差进一步减小。"""
         est = BallEstimator(dt=0.005, pos_noise_std=0.1, vel_noise_std=0.5)
 
-        # 以高噪声更新 5 次
         for _ in range(5):
             est.update(np.array([1.0, 2.0, 3.0]), np.array([0.1, 0.2, 0.3]))
 
-        # 缩小噪声并验证 R 已更新
         est.update_noise_params(pos_noise_std=0.001, vel_noise_std=0.005)
         assert est._R[0, 0] == 0.001 ** 2
         assert est._R[3, 3] == 0.005 ** 2
 
-        # 再更新 5 次，协方差继续缩小
         p_before = np.trace(est.covariance)
         for _ in range(5):
             est.update(np.array([1.0, 2.0, 3.0]), np.array([0.1, 0.2, 0.3]))
         p_after = np.trace(est.covariance)
         assert p_after < p_before
+
+    def test_incremental_update_preserves_per_axis(self) -> None:
+        """per-axis R 设置后，增量更新未传的轴保持原值。"""
+        est = BallEstimator(dt=0.005, pos_noise_xyz=(0.02, 0.05, 0.03))
+        est.update_noise_params(vel_noise_std=0.1)
+        assert est._R[0, 0] == 0.02 ** 2
+        assert est._R[1, 1] == 0.05 ** 2
+        assert est._R[2, 2] == 0.03 ** 2
+        assert est._R[3, 3] == est._R[4, 4] == est._R[5, 5] == 0.1 ** 2

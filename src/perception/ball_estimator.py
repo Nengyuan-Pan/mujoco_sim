@@ -166,14 +166,21 @@ class BallEstimator:
         Args:
             pos_noise_std: 新的位置标量噪声 std，None 表示不修改。
             vel_noise_std: 新的速度标量噪声 std，None 表示不修改。
-            pos_noise_xyz: 新的 per-axis 位置噪声，None 表示不修改。
-            vel_noise_xyz: 新的 per-axis 速度噪声，None 表示不修改。
+            pos_noise_xyz: 新的 per-axis 位置噪声，None 表示保持当前值。
+            vel_noise_xyz: 新的 per-axis 速度噪声，None 表示保持当前值。
         """
-        p_std = pos_noise_std if pos_noise_std is not None else np.sqrt(self._R[0, 0])
-        v_std = vel_noise_std if vel_noise_std is not None else np.sqrt(self._R[3, 3])
-        p_xyz = pos_noise_xyz
-        v_xyz = vel_noise_xyz
-        self._R = self._build_R(p_std, v_std, p_xyz, v_xyz)
+        if pos_noise_xyz is not None:
+            self._R[0, 0] = pos_noise_xyz[0] ** 2
+            self._R[1, 1] = pos_noise_xyz[1] ** 2
+            self._R[2, 2] = pos_noise_xyz[2] ** 2
+        elif pos_noise_std is not None:
+            self._R[0, 0] = self._R[1, 1] = self._R[2, 2] = pos_noise_std ** 2
+        if vel_noise_xyz is not None:
+            self._R[3, 3] = vel_noise_xyz[0] ** 2
+            self._R[4, 4] = vel_noise_xyz[1] ** 2
+            self._R[5, 5] = vel_noise_xyz[2] ** 2
+        elif vel_noise_std is not None:
+            self._R[3, 3] = self._R[4, 4] = self._R[5, 5] = vel_noise_std ** 2
 
     def reset(self) -> None:
         """完全重置滤波器（用于新的发球/实验）。"""
