@@ -12,6 +12,7 @@ import mujoco
 from pathlib import Path
 
 from src.utils.mujoco_loader import load_mujoco_model
+from src.perception.ball_estimator import BallEstimator
 
 
 class RM65Env:
@@ -26,12 +27,20 @@ class RM65Env:
     BALL_QPOS_START: int = 12
     BALL_QVEL_START: int = 12
 
-    def __init__(self, model_path: Path, dt: float | None = None) -> None:
+    def __init__(
+        self,
+        model_path: Path,
+        dt: float | None = None,
+        estimator: BallEstimator | None = None,
+        estimator_config: dict | None = None,
+    ) -> None:
         """初始化 RM-65 MuJoCo 环境。
 
         Args:
             model_path: MuJoCo XML 模型文件路径。
             dt: 可选的覆盖时间步长。
+            estimator: 预配置的 BallEstimator 实例，None 或不存在时不滤波。
+            estimator_config: BallEstimator 参数字典，estimator 非 None 时忽略。
         """
         self.model = load_mujoco_model(model_path)
         if dt is not None:
@@ -49,6 +58,11 @@ class RM65Env:
         )
 
         self.init_q_left: np.ndarray = np.zeros(self.LEFT_ARM_NQ)
+        self._estimator = None
+        if estimator is not None:
+            self._estimator = estimator
+        elif estimator_config is not None:
+            self._estimator = BallEstimator(self.dt, **estimator_config)
 
     def reset(self, q0: np.ndarray | None = None) -> np.ndarray:
         """重置仿真状态。
@@ -273,20 +287,26 @@ class RM65Env:
             self.data.qvel[bv + 3:bv + 6] = vel[3:6]
 
     def get_ball_state(self) -> tuple[np.ndarray, np.ndarray]:
-        """获取球的当前位置和速度。"""
+        """获取球的当前位置和速度（如有 estimator 则返回滤波值）。"""
         bq = self.BALL_QPOS_START
         bv = self.BALL_QVEL_START
         pos = self.data.qpos[bq: bq + 3].copy()
         vel = self.data.qvel[bv: bv + 3].copy()
+        if self._estimator is not None:
+            pos, vel = self._estimator.update(pos, vel)
         return pos, vel
 
     def get_ball_pos(self) -> np.ndarray:
-        """获取球的当前世界坐标位置。"""
+        """获取球的当前世界坐标位置（如有 estimator 则返回滤波值）。"""
+        if self._estimator is not None:
+            return self._estimator.state[0]
         bq = self.BALL_QPOS_START
         return self.data.qpos[bq: bq + 3].copy()
 
     def get_ball_vel(self) -> np.ndarray:
-        """获取球的当前线速度。"""
+        """获取球的当前线速度（如有 estimator 则返回滤波值）。"""
+        if self._estimator is not None:
+            return self._estimator.state[1]
         bv = self.BALL_QVEL_START
         return self.data.qvel[bv: bv + 3].copy()
 
