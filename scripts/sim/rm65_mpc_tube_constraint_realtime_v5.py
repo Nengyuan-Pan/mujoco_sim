@@ -1,14 +1,47 @@
-"""RM-65 Tube-based Robust Hitting + 右臂硬半空间约束 实验脚本。
+"""RM-65 Tube-based Robust Hitting + 右臂硬半空间约束 实验脚本（V5）。
 
-在 rm65_mpc_tube.py 基础上新增执行层硬约束：
-  每步执行后检查 r_link3 (肘)、r_link5 (腕)、r_racket_body (球拍) 的 X 坐标。
-  若任何 body 越过身体中线 X=0，立即用 PD 控制推回安全位形一步。
-  不依赖代价函数软惩罚 —— 直接在物理层面阻止越界。
+=== V5 相对 V4 的改进 ===
+
+1. Midpoint 机制（核心改进）:
+   v4 仅靠终端代价引导到击球点。v5 在 k_hit 步设置中途目标：
+     set_midpoint_target(k_hit, p_hit, Q_p*2.0, v_target=v_hit_at_contact, Q_midpoint_v=Q_v*5.0)
+   效果: iLQR 轨迹在 k_hit 步强制经过击球位置 p_hit，且速度匹配期望击球速度。
+   激活条件: k_hit < horizon_plan（近阶段生效，远阶段 midpoint 在规划范围外）。
+   这是 v5 高成功率（96%）的关键: 近阶段精确约束时空，远阶段 softmin 提供鲁棒性。
+
+2. 终端目标改为随挥终点:
+   v4 终端 = p_hit + 0.01m（击球点附近）。v5 终端 = p_hit + 0.4~0.5m * d_hat（随挥终点）。
+   iLQR 规划"加速→击球→减速→随挥终点"的完整轨迹。
+   配合 midpoint：midpoint 在 k_hit 强制经过 p_hit（高速），终端在随挥终点（低速 0.3m/s）。
+   这创造了"穿过击球点"的动量效果，而非"停在击球点"。
+
+3. 扩展 total_horizon 包含随挥段:
+   v4 total_horizon 不含随挥，通过 continue 跳过正常循环。v5 扩展 horizon 含随挥段。
+
+4. 碰撞检测触发随挥:
+   v4 仅在 k_hit <= 1 时触发随挥。v5 额外增加了碰撞检测触发：
+   当 ball_was_hit 且 step - hit_step >= 3 时也进入随挥模式。
+
+=== 与 V2 的差异汇总 ===
+v5 继承了 v4 的所有改进（来球方向自适应、秩1 Q_v、PD 随挥），并新增 midpoint + 随挥终端。
+
+=== 已知问题 ===
+- 击球时 TCP 速度 ≈ 0 m/s（vel_error ≈ 5.0 m/s vs 期望 5.0 m/s）
+  原因: TCP 硬限 1.8 m/s + 终端指向随挥终点导致 arm 在击球点附近减速
+  消融实验中仍达 96% 成功率（12cm 阈值），但击球力度不足
+
+=== 版本架构对比 ===
+
+              击球方向    终端目标          Q_v         Midpoint  随挥
+  v2          固定YAML    p_hit+0.01m      满秩[400]   无        无
+  v4          来球反向    p_hit+0.01m      秩1[10000]  无        PD控制器
+  v5(本文件)  来球反向    p_hit+0.5m(随挥) 秩1[10000]  有(k_hit) PD+碰撞触发
+  v6(开发中)  来球反向    p_hit(击球点)    秩1[10000]  可选      PD控制器
 
 用法:
-  python scripts/rm65_mpc_tube_constraint.py --serve-box --ball-speed 12 --viewer
-  python scripts/rm65_mpc_tube_constraint.py --serve-box --ball-speed 15 --viewer
-  python scripts/rm65_mpc_tube_constraint.py --use_tube false --viewer --seed 42
+  python scripts/rm65_mpc_tube_constraint_realtime_v5.py --serve-box --ball-speed 12 --viewer
+  python scripts/rm65_mpc_tube_constraint_realtime_v5.py --serve-box --ball-speed 15 --viewer
+  python scripts/rm65_mpc_tube_constraint_realtime_v5.py --use_tube false --viewer --seed 42
 """
 
 from __future__ import annotations
@@ -24,7 +57,7 @@ from typing import Optional
 import numpy as np
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from src.sim.rm65_env import RM65Env
 from src.tennis.ball import (
@@ -485,15 +518,6 @@ class TubeConfig:
     window_half_ms: float = 50.0
     """候选窗口半宽（毫秒），以 best_k 为中心前后扩展。"""
 
-    sigma0: float = 0.02
-    """初始位置不确定性半径（米）。"""
-
-    sigma_v: float = 0.008
-    """速度不确定性增长率（米/秒/秒）。"""
-
-    sigma_a: float = 0.001
-    """加速度不确定性增长率（米/秒²/秒²）。"""
-
     contact_offset: float = 0.0
     """球拍接触点偏移（米），球拍中心到击球面的偏移。"""
 
@@ -512,6 +536,15 @@ class TubeConfig:
     tube_cost_ratio: float = 1.0
     """Tube 代价占总代价的比例（0~1），剩余来自原 HittingCost 终端代价。"""
 
+    softmin_beta: float = 5.0
+    """终端 softmin 锐度参数 β。β 越大越接近 hard-min（只选最优候选），
+    β 越小越接近均匀平均（所有候选等权）。建议范围 1.0~20.0。"""
+
+    use_softmin_terminal: bool = True
+    """是否启用多终端 softmin 代价（P0-2 改进）。
+    True: 终端代价在多个候选位置上 softmin，容忍时间不确定性。
+    False: 仅在 best_k 单点终端代价（原始行为）。"""
+
 
 @dataclass
 class BallTrajectoryTube:
@@ -525,9 +558,6 @@ class BallTrajectoryTube:
 
     times: np.ndarray
     """时间序列，形状 (N,)。"""
-
-    pos_sigma: np.ndarray
-    """每步位置不确定性半径，形状 (N,)。"""
 
 
 @dataclass
@@ -548,9 +578,6 @@ class HitWindow:
 
     weights: np.ndarray
     """候选权重（高斯衰减），形状 (M,)。"""
-
-    uncertainty_radius: np.ndarray
-    """每步不确定性半径，形状 (M,)。"""
 
 
 @dataclass
@@ -578,9 +605,6 @@ class HittingTube:
     weights: np.ndarray
     """候选权重，形状 (M,)。"""
 
-    uncertainty_radius: np.ndarray
-    """不确定性半径，形状 (M,)。"""
-
     best_k: int
 
 
@@ -594,27 +618,13 @@ def build_ball_trajectory_tube(
     dt: float,
     config: TubeConfig,
 ) -> BallTrajectoryTube:
-    """将确定球轨迹转换为带不确定性半径的管道。
-
-    pos_sigma[k] = sigma0 + sigma_v * t_k + sigma_a * t_k^2
-
-    Args:
-        ball_positions: 球位置轨迹，形状 (N, 3)。
-        ball_velocities: 球速度轨迹，形状 (N, 3)。
-        dt: 仿真步长。
-        config: Tube 配置。
-
-    Returns:
-        BallTrajectoryTube 实例。
-    """
+    """将确定球轨迹转换为管道（仅保留位置和速度信息）。"""
     N = len(ball_positions)
     times = np.arange(N) * dt
-    pos_sigma = config.sigma0 + config.sigma_v * times + config.sigma_a * times**2
     return BallTrajectoryTube(
         positions=ball_positions.copy(),
         velocities=ball_velocities.copy(),
         times=times.copy(),
-        pos_sigma=pos_sigma,
     )
 
 
@@ -677,7 +687,6 @@ def search_hit_window(
     candidates_k_abs: list[int] = []
     candidates_p: list[np.ndarray] = []
     candidates_v: list[np.ndarray] = []
-    candidates_u: list[float] = []
 
     for k in range(k_min_abs, k_max_abs + 1):
         if k < 1 or k > len(ball_positions):
@@ -715,23 +724,15 @@ def search_hit_window(
         candidates_p.append(p_ball.copy())
         candidates_v.append(v_ball.copy())
 
-        # 不确定性半径
-        t = k * dt
-        sigma = config.sigma0 + config.sigma_v * t + config.sigma_a * t**2
-        candidates_u.append(sigma)
-
     if len(candidates_k_abs) == 0:
         # 回退：至少包含 best_k_abs
         k = best_k_abs
         if 1 <= k <= len(ball_positions):
             p_ball = ball_positions[k - 1]
             v_ball = ball_velocities[k - 1]
-            t = k * dt
-            sigma = config.sigma0 + config.sigma_v * t + config.sigma_a * t**2
             candidates_k_abs.append(k)
             candidates_p.append(p_ball.copy())
             candidates_v.append(v_ball.copy())
-            candidates_u.append(sigma)
 
     # 5. 计算高斯衰减权重：exp(-0.5 * ((k - best_k) / half_window)^2)
     half_ws = max(window_half_steps, 1)
@@ -749,7 +750,6 @@ def search_hit_window(
         p_ball_candidates=np.array(candidates_p),
         v_ball_candidates=np.array(candidates_v),
         weights=weights,
-        uncertainty_radius=np.array(candidates_u),
     )
 
 
@@ -802,7 +802,6 @@ def build_hitting_tube(
         p_ball=hit_window.p_ball_candidates.copy(),
         v_ball=hit_window.v_ball_candidates.copy(),
         weights=hit_window.weights.copy(),
-        uncertainty_radius=hit_window.uncertainty_radius.copy(),
         best_k=hit_window.best_k,
     )
 
@@ -814,15 +813,22 @@ def build_hitting_tube(
 class TubeHittingCostWrapper:
     """包装 HittingCost，在候选击球窗口内施加空间走廊式 tube 代价。
 
-    设计思路（空间重合，而非时间追踪）：
+    空间走廊（hinge loss）：
+      - 走廊半宽 = RACKET_RADIUS（固定）
+      - hinge loss: margin = perp_dist - RACKET_RADIUS
+      - 走廊内零代价，走廊外二次惩罚
+
+    Softmin 多终端代价：
+      - 终端代价在所有候选击球位置上取 softmin
+      - 求解器不需要精确预测"何时"击球，只需到达某个候选位置即可获得低代价
+      - 球早到/晚到时，对应的候选位置提供低代价路径
+
+    原始设计（空间重合，而非时间追踪）：
     - 提取球在窗口内的轨迹线方向 d_ball，构建"空间走廊"
     - 在 tube 窗口内的每个 iLQR 步 k，注入三类代价：
-      1. 垂直偏离代价：球拍到球轨迹线的垂直距离（hinge loss），
-         不绑定"第 k 步必须到 p_ball(k)"的时间-空间对应
-      2. 速度方向代价：球拍速度在垂直于 d_ball 方向的分量应尽量小，
-         鼓励球拍沿球轨迹线方向运动（相向扫过），实现空间轨迹重合
+      1. 垂直偏离代价（hinge loss）：不绑定时间-空间对应
+      2. 速度方向代价：鼓励球拍沿球轨迹线方向运动
       3. 法向量代价：拍面朝向来球方向
-    - 终端代价保留原有 HittingCost（乘以 1 - tube_ratio），位置部分放宽
     - 兼容 ILQTSolver 的接口
     """
 
@@ -852,11 +858,15 @@ class TubeHittingCostWrapper:
         self.config = config
 
         self._tube_ratio = config.tube_cost_ratio
-        self._current_ratio = config.tube_cost_ratio  # 当前有效比例（可随时间衰减）
-        self._anchor_alpha: float = 0.9  # 终端锚定强度（0=全约束, 1=沿d_ball完全自由）
+        self._current_ratio = config.tube_cost_ratio
+        self._anchor_alpha: float = 0.9
         self._Q_p_tube = config.Q_p_tube
         self._Q_v_tube = config.Q_v_tube
         self._Q_n_tube = config.Q_n_tube
+
+        # P0-2: softmin 参数
+        self._use_softmin = config.use_softmin_terminal
+        self._softmin_beta = config.softmin_beta
 
         self._tube_steps: set[int] = set()
         self._tube_weight_scales: dict[int, float] = {}
@@ -864,11 +874,20 @@ class TubeHittingCostWrapper:
         self._P_perp: np.ndarray = np.zeros((3, 3))
         self._p_ball_ref: np.ndarray = np.zeros(3)
         self._n_des_common: np.ndarray = np.zeros(3)
-        self._max_uncertainty: float = 0.0
+        # P0-2: 多终端候选信息（用于 softmin）
+        self._p_ball_candidates: np.ndarray = np.zeros((0, 3))
+        self._v_des_candidates: np.ndarray = np.zeros((0, 3))
+        self._n_des_candidates: np.ndarray = np.zeros((0, 3))
+        self._candidate_weights: np.ndarray = np.zeros(0)
+        # 可解释性日志：最近一次 softmin 权重和候选代价
+        self._last_softmin_alphas: np.ndarray = np.zeros(0)
+        self._last_softmin_costs: np.ndarray = np.zeros(0)
+        # 可解释性日志：最近一次 tube 走廊 margin
+        self._last_tube_margins: dict[int, float] = {}
         self._rebuild_tube_maps(hitting_tube, horizon)
 
     def _rebuild_tube_maps(self, tube: HittingTube, horizon: int) -> None:
-        """重建 tube 步集合、权重缓存和空间走廊几何信息。"""
+        """重建 tube 步集合、权重缓存和终端候选信息。"""
         self._tube_steps.clear()
         self._tube_weight_scales.clear()
 
@@ -877,7 +896,10 @@ class TubeHittingCostWrapper:
             self._P_perp = np.zeros((3, 3))
             self._p_ball_ref = np.zeros(3)
             self._n_des_common = np.zeros(3)
-            self._max_uncertainty = 0.0
+            self._p_ball_candidates = np.zeros((0, 3))
+            self._v_des_candidates = np.zeros((0, 3))
+            self._n_des_candidates = np.zeros((0, 3))
+            self._candidate_weights = np.zeros(0)
             return
 
         for i in range(len(tube.k_candidates)):
@@ -905,8 +927,19 @@ class TubeHittingCostWrapper:
         # 法向量：用 best_k 对应的拍面法向
         self._n_des_common = tube.n_racket_des[best_idx].copy()
 
-        # 最大不确定性半径（走廊半宽）
-        self._max_uncertainty = float(np.max(tube.uncertainty_radius))
+        # P0-2: 保存所有候选位置用于多终端 softmin
+        self._p_ball_candidates = tube.p_ball.copy()
+        self._v_des_candidates = tube.v_racket_des.copy()
+        self._n_des_candidates = tube.n_racket_des.copy()
+        self._candidate_weights = tube.weights.copy()
+
+        if len(self._candidate_weights) > 0:
+            top3 = np.argsort(self._candidate_weights)[-min(3, len(self._candidate_weights)):][::-1]
+            w_str = ", ".join(
+                f"k={int(tube.k_candidates[i])}:w={self._candidate_weights[i]:.3f}"
+                for i in top3
+            )
+            logger.info(f"[Softmin诊断] 候选权重TOP3: {w_str}")
 
     def running_cost(self, x: np.ndarray, u: np.ndarray, k: int | None = None) -> float:
         """计算运行代价 = 原始运行代价 + tube 代价（若 k 在候选窗口内）。"""
@@ -916,17 +949,30 @@ class TubeHittingCostWrapper:
         return cost
 
     def terminal_cost(self, x: np.ndarray) -> float:
-        """终端代价 = 全约束终端代价（不缩放）。
+        """计算终端代价。
 
-        终端代价保持完整权重以确保末端精确到达击打点。
-        Tube 的走廊引导仅通过 running_cost 中的 tube 代价提供，
-        不削弱终端代价可以避免精度损失。
+        V2 改进（P0-2）：
+        若启用 softmin，终端代价在所有候选击球位置上取 softmin：
+          cost = -log(Σ_i w_i * exp(-β * c_i)) / β
+        其中 c_i = ||p_ee - p_ball[i]||²_Qp + ||v_ee - v_des[i]||²_Qv
+        这允许求解器"选择"在任意候选时刻击球，容忍时间不确定性。
+
+        若未启用 softmin，退化为原始单点终端代价。
         """
         self.env.set_arm_state(x)
         p_ee = self.env.get_ee_pos()
         v_ee = self.env.get_ee_vel()
         n_rack = self.env.get_ee_normal()
 
+        if self._use_softmin and len(self._p_ball_candidates) > 1:
+            return self._compute_softmin_terminal(p_ee, v_ee, n_rack)
+        else:
+            return self._compute_single_terminal(p_ee, v_ee, n_rack)
+
+    def _compute_single_terminal(
+        self, p_ee: np.ndarray, v_ee: np.ndarray, n_rack: np.ndarray
+    ) -> float:
+        """原始单点终端代价（best_k 处的精确击打约束）。"""
         dp = p_ee - self.base_cost.p_hit
         cost_p = 0.5 * float(dp @ self.base_cost.Q_p @ dp)
 
@@ -937,7 +983,51 @@ class TubeHittingCostWrapper:
         if self.base_cost.n_des is not None and self.base_cost.Q_n > 0:
             n_err = n_rack - self.base_cost.n_des
             cost += 0.5 * self.base_cost.Q_n * float(n_err @ n_err)
-        return cost
+        return (1.0 - self._current_ratio) * cost
+
+    def _compute_softmin_terminal(
+        self, p_ee: np.ndarray, v_ee: np.ndarray, n_rack: np.ndarray
+    ) -> float:
+        """P0-2: 多终端 softmin 代价。
+
+        对每个候选位置 i 计算：
+          c_i = 0.5 * [ ||p_ee - p_ball_i||²_Qp + ||v_ee - v_des_i||²_Qv
+                        + Q_n * ||n_rack - n_des_i||² ]
+        然后取 softmin:
+          cost = -log(Σ_i w_i * exp(-β * c_i)) / β
+
+        softmin 的效果：只有代价最低的候选（最接近的候选位置）主导结果，
+        但梯度从所有候选流向最优点附近的候选，保证光滑可微。
+
+        Returns:
+            终端代价值（已乘以 tube_ratio 缩放）。
+        """
+        M = len(self._p_ball_candidates)
+        Q_p = self.base_cost.Q_p
+        Q_v = self.base_cost.Q_v
+        Q_n = self.base_cost.Q_n
+
+        costs_i = np.zeros(M)
+        for i in range(M):
+            dp = p_ee - self._p_ball_candidates[i]
+            costs_i[i] = 0.5 * float(dp @ Q_p @ dp)
+
+            dv = v_ee - self._v_des_candidates[i]
+            costs_i[i] += 0.5 * float(dv @ Q_v @ dv)
+
+            if Q_n > 0:
+                n_err = n_rack - self._n_des_candidates[i]
+                costs_i[i] += 0.5 * Q_n * float(n_err @ n_err)
+
+        # softmin: -log(Σ w_i * exp(-β * c_i)) / β
+        # 数值稳定：减去最大值避免溢出
+        beta = self._softmin_beta
+        weighted_neg_costs = -beta * costs_i + np.log(self._candidate_weights + 1e-30)
+        max_wnc = np.max(weighted_neg_costs)
+        log_sum = max_wnc + np.log(np.sum(np.exp(weighted_neg_costs - max_wnc)))
+        softmin_val = -log_sum / beta
+
+        return (1.0 - self._current_ratio) * softmin_val
 
     def running_derivatives(
         self, x: np.ndarray, u: np.ndarray, k: int | None = None
@@ -951,7 +1041,11 @@ class TubeHittingCostWrapper:
         return l_x, l_u, l_xx, l_ux, l_uu
 
     def terminal_derivatives(self, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """终端代价导数 = (1 - tube_ratio) * 全约束终端导数。"""
+        """终端代价导数。
+
+        V2 改进（P0-2）：softmin 加权导数。
+        softmin 的梯度 = Σ_i α_i * ∂c_i/∂x，其中 α_i 是 softmin 权重。
+        """
         n_x = self.env.NX
         n_q = self.env.NQ
 
@@ -961,6 +1055,28 @@ class TubeHittingCostWrapper:
         n_rack = self.env.get_ee_normal()
         J_p = self.env.get_ee_jacp()
 
+        if self._use_softmin and len(self._p_ball_candidates) > 1:
+            l_x, l_xx = self._compute_softmin_terminal_derivatives(
+                p_ee, v_ee, n_rack, J_p, n_x, n_q
+            )
+        else:
+            l_x, l_xx = self._compute_single_terminal_derivatives(
+                p_ee, v_ee, n_rack, J_p, n_x, n_q
+            )
+
+        scale = 1.0 - self._current_ratio
+        return scale * l_x, scale * l_xx
+
+    def _compute_single_terminal_derivatives(
+        self,
+        p_ee: np.ndarray,
+        v_ee: np.ndarray,
+        n_rack: np.ndarray,
+        J_p: np.ndarray,
+        n_x: int,
+        n_q: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """原始单点终端代价导数。"""
         K_p = self.base_cost.Q_p
         dp = p_ee - self.base_cost.p_hit
 
@@ -988,8 +1104,101 @@ class TubeHittingCostWrapper:
             l_x += self.base_cost.Q_n * (J_n.T @ n_err)
             l_xx += self.base_cost.Q_n * (J_n.T @ J_n)
 
-        scale = 1.0
-        return scale * l_x, scale * l_xx
+        return l_x, l_xx
+
+    def _compute_softmin_terminal_derivatives(
+        self,
+        p_ee: np.ndarray,
+        v_ee: np.ndarray,
+        n_rack: np.ndarray,
+        J_p: np.ndarray,
+        n_x: int,
+        n_q: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """P0-2: 多终端 softmin 代价的 Gauss-Newton 近似导数。
+
+        softmin(c_1, ..., c_M) = -log(Σ w_i * exp(-β * c_i)) / β
+
+        梯度：∂softmin/∂x = Σ_i α_i * ∂c_i/∂x
+        Hessian 近似：Σ_i α_i * ∂²c_i/∂x²
+        其中 α_i = w_i * exp(-β * c_i) / Σ_j w_j * exp(-β * c_j)  是 softmin 权重。
+
+        Returns:
+            (l_x, l_xx) — 终端代价对状态的一阶和二阶导数。
+        """
+        M = len(self._p_ball_candidates)
+        Q_p = self.base_cost.Q_p
+        Q_v = self.base_cost.Q_v
+        Q_n = self.base_cost.Q_n
+        beta = self._softmin_beta
+
+        # 计算每个候选的代价
+        costs_i = np.zeros(M)
+        for i in range(M):
+            dp = p_ee - self._p_ball_candidates[i]
+            costs_i[i] = 0.5 * float(dp @ Q_p @ dp)
+            dv = v_ee - self._v_des_candidates[i]
+            costs_i[i] += 0.5 * float(dv @ Q_v @ dv)
+            if Q_n > 0:
+                n_err = n_rack - self._n_des_candidates[i]
+                costs_i[i] += 0.5 * Q_n * float(n_err @ n_err)
+
+        # 计算 softmin 权重 α_i
+        weighted_neg_costs = -beta * costs_i + np.log(self._candidate_weights + 1e-30)
+        max_wnc = np.max(weighted_neg_costs)
+        exp_wnc = np.exp(weighted_neg_costs - max_wnc)
+        alpha_i = exp_wnc / np.sum(exp_wnc)
+
+        # 可解释性：缓存 softmin 权重和候选代价
+        self._last_softmin_alphas = alpha_i.copy()
+        self._last_softmin_costs = costs_i.copy()
+
+        # 加权组合各候选的导数
+        l_x = np.zeros(n_x)
+        l_xx = np.zeros((n_x, n_x))
+
+        # 法向量雅可比（对所有候选共用）
+        J_omega = None
+        J_n = None
+        if Q_n > 0:
+            J_omega = self.env.get_ee_jacr()
+            nx, ny, nz = -n_rack[0], -n_rack[1], -n_rack[2]
+            skew = np.array([
+                [0, -nz, ny],
+                [nz, 0, -nx],
+                [-ny, nx, 0],
+            ])
+            J_n = np.zeros((3, n_x))
+            J_n[:, :n_q] = skew @ J_omega
+
+        for i in range(M):
+            a_i = alpha_i[i]
+            if a_i < 1e-12:
+                continue
+
+            # 位置导数
+            dp = p_ee - self._p_ball_candidates[i]
+            l_x[:n_q] += a_i * (J_p.T @ Q_p @ dp)
+            l_xx[:n_q, :n_q] += a_i * (J_p.T @ Q_p @ J_p)
+
+            # 速度导数
+            dv = v_ee - self._v_des_candidates[i]
+            l_x[n_q:] += a_i * (J_p.T @ Q_v @ dv)
+            l_xx[n_q:, n_q:] += a_i * (J_p.T @ Q_v @ J_p)
+
+            # 法向量导数
+            if Q_n > 0 and J_n is not None:
+                n_err = n_rack - self._n_des_candidates[i]
+                l_x += a_i * Q_n * (J_n.T @ n_err)
+                l_xx += a_i * Q_n * (J_n.T @ J_n)
+
+        # Hessian 修正：加入 α_i 的一阶项（交叉项）
+        # 对于 softmin，完整的 Hessian 包含 Σ_i α_i * (∂c_i/∂x)(∂c_i/∂x)^T
+        # 减去 (Σ_i α_i * ∂c_i/∂x)(Σ_i α_i * ∂c_i/∂x)^T 乘以 β
+        # 但这在 Gauss-Newton 近似中通常省略，因为 β 不太大时影响有限
+        # 此处保留简化版本，仅用加权二阶项
+
+        return l_x, l_xx
 
     def update_target(self, p_hit: np.ndarray, v_hit: np.ndarray, n_des: np.ndarray | None = None) -> None:
         """委托给 base_cost 更新终端目标。"""
@@ -1034,8 +1243,12 @@ class TubeHittingCostWrapper:
     def _compute_tube_cost_at_k(self, x: np.ndarray, k: int) -> float:
         """计算步骤 k 处的空间走廊 tube 代价值。
 
+        走廊半宽 = RACKET_RADIUS（固定）。
+        走廊内（perp_dist < RACKET_RADIUS）零代价，
+        走廊外二次惩罚。
+
         三项代价：
-        1. 垂直偏离代价（hinge loss）：球拍到球轨迹线的垂直距离
+        1. 垂直偏离代价（hinge loss）：margin > 0 时惩罚
         2. 速度方向代价：球拍速度垂直于球轨迹方向的分量
         3. 法向量代价：拍面法向与期望法向的对齐程度
         """
@@ -1046,8 +1259,9 @@ class TubeHittingCostWrapper:
 
         # 1. 垂直偏离代价（hinge loss）
         dp = p_ee - self._p_ball_ref
-        perp_dist = float(np.linalg.norm(self._P_perp @ dp))
-        margin = perp_dist - self.RACKET_RADIUS - self._max_uncertainty
+        dp_perp = self._P_perp @ dp
+        perp_dist = float(np.linalg.norm(dp_perp))
+        margin = perp_dist - self.RACKET_RADIUS
         pos_err = max(0.0, margin)
         pos_cost = self._Q_p_tube * pos_err**2
 
@@ -1067,6 +1281,9 @@ class TubeHittingCostWrapper:
     ) -> tuple[np.ndarray, np.ndarray]:
         """计算步骤 k 处空间走廊 tube 代价的 Gauss-Newton 近似导数。
 
+        hinge loss 的导数仅在 margin > 0 时激活，
+        走廊内梯度为零（不干扰优化），走廊外提供平滑梯度引导球拍回到走廊内。
+
         Returns:
             (l_x_tube, l_xx_tube)
         """
@@ -1084,30 +1301,29 @@ class TubeHittingCostWrapper:
         l_x_tube = np.zeros(n_x)
         l_xx_tube = np.zeros((n_x, n_x))
 
-        # ---- 1. 垂直偏离代价 (hinge loss on perp distance) ----
+        # ---- 1. 垂直偏离代价（hinge loss）----
+        # cost = Q_p * max(0, perp_dist - RACKET_RADIUS)^2
+        # 当 margin > 0 时有梯度，否则为零
         dp = p_ee - self._p_ball_ref
         dp_perp = self._P_perp @ dp
         perp_dist = float(np.linalg.norm(dp_perp))
-        margin = perp_dist - self.RACKET_RADIUS - self._max_uncertainty
+        margin = perp_dist - self.RACKET_RADIUS
 
-        if margin > 0 and perp_dist > 1e-8:
-            # d(perp_dist)/dp = dp_perp / perp_dist  (因为 dp_perp 已经是垂直分量)
-            # dp_perp / perp_dist 是垂直平面内的单位方向
-            dir_perp = dp_perp / perp_dist
-            # l_x 的位置部分: Q_p * margin * J_p^T @ dir_perp
-            Jp_dir = J_p.T @ dir_perp
-            l_x_tube[:n_q] += self._Q_p_tube * margin * Jp_dir
-            # l_xx 的位置部分: Q_p * outer(J_p^T @ dir_perp, J_p^T @ dir_perp)
-            l_xx_tube[:n_q, :n_q] += self._Q_p_tube * np.outer(Jp_dir, Jp_dir)
+        if margin > 0.0 and perp_dist > 1e-8:
+            # 梯度方向：dp_perp 的单位向量
+            dp_perp_hat = dp_perp / perp_dist
+            # ∂perp_dist/∂q = dp_perp_hat^T @ P_perp @ J_p
+            grad_perp_q = dp_perp_hat @ self._P_perp @ J_p  # (n_q,)
+            l_x_tube[:n_q] += self._Q_p_tube * margin * grad_perp_q
+            l_xx_tube[:n_q, :n_q] += self._Q_p_tube * np.outer(grad_perp_q, grad_perp_q)
+
+        # 可解释性：缓存走廊 margin
+        self._last_tube_margins[k] = margin
 
         # ---- 2. 速度方向代价 (v_perp = P_perp @ v_ee) ----
-        # v_perp = P_perp @ v_ee
-        # dv_perp/dqdot = P_perp @ J_p  (因为 v_ee ≈ J_p @ qdot，位置雅可比也可用于线速度)
-        Jp_perp = self._P_perp @ J_p  # (3, n_q)
-        v_perp = self._P_perp @ v_ee   # (3,)
-        # l_x 速度部分: Q_v * Jp_perp^T @ v_perp  (作用于 qdot 部分，即 x[n_q:])
+        Jp_perp = self._P_perp @ J_p
+        v_perp = self._P_perp @ v_ee
         l_x_tube[n_q:] += self._Q_v_tube * (Jp_perp.T @ v_perp)
-        # l_xx 速度部分: Q_v * Jp_perp^T @ Jp_perp
         l_xx_tube[n_q:, n_q:] += self._Q_v_tube * (Jp_perp.T @ Jp_perp)
 
         # ---- 3. 法向量代价 ----
@@ -1323,11 +1539,21 @@ def do_replan(
     if k_hit_candidate < max(10, k_hit_new // 4) and k_hit_new > 30:
         k_hit_candidate = max(1, k_hit_new - cfg["replan_interval"])
 
-    # 时间扰动
+    # 衰减式扰动：计算衰减系数（模拟预测精度随观测逐步提高）
+    decay_alpha = 1.0
+    if abs(cfg.get("time_perturb_s", 0.0)) > 1e-6 or abs(cfg.get("space_perturb_m", 0.0)) > 1e-6:
+        r_interval = cfg.get("replan_interval", 20)
+        r_total = max(1, cfg.get("k_hit_total", 100) // r_interval)
+        r_count = max(1, (cfg.get("k_hit_total", 100) - remaining_horizon) // r_interval + 1)
+        decay_alpha = max(cfg.get("perturb_alpha_min", 0.0), 1.0 - r_count / r_total)
+
+    # 时间扰动（衰减式）
     if abs(cfg.get("time_perturb_s", 0.0)) > 1e-6:
-        perturb_steps = int(round(cfg["time_perturb_s"] / cfg["dt"]))
-        k_hit_candidate = k_hit_candidate - perturb_steps
-        k_hit_candidate = max(5, min(k_hit_candidate, remaining_horizon - 1))
+        effective_perturb = cfg["time_perturb_s"] * decay_alpha
+        perturb_steps = int(round(effective_perturb / cfg["dt"]))
+        if perturb_steps != 0:
+            k_hit_candidate = k_hit_candidate - perturb_steps
+            k_hit_candidate = max(5, min(k_hit_candidate, remaining_horizon - 1))
 
     p_hit_new = hit_info_new["p_hit"].copy()
     v_ball_hit_new = hit_info_new["v_ball_hit"].copy()
@@ -1342,27 +1568,37 @@ def do_replan(
     if ball_spd > max_ee_v * 2.0:
         logger.warning(f"ASYNC 步 {step}: 球速 {ball_spd:.1f}m/s 超过限速 {max_ee_v:.1f}m/s")
 
-    # 3. 空间偏移
+    # 3. 空间偏移（衰减式）
     if abs(cfg.get("space_perturb_m", 0.0)) > 1e-6:
-        d_ball_hit = v_ball_hit_new / (np.linalg.norm(v_ball_hit_new) + 1e-8)
-        lateral = np.cross(d_ball_hit, np.array([0.0, 0.0, 1.0]))
-        lateral_norm = np.linalg.norm(lateral)
-        if lateral_norm > 1e-6:
-            lateral /= lateral_norm
-        else:
-            lateral = np.array([1.0, 0.0, 0.0])
-        p_hit_new = p_hit_new + lateral * cfg["space_perturb_m"]
+        effective_sp = cfg["space_perturb_m"] * decay_alpha
+        if abs(effective_sp) > 1e-6:
+            d_ball_hit = v_ball_hit_new / (np.linalg.norm(v_ball_hit_new) + 1e-8)
+            lateral = np.cross(d_ball_hit, np.array([0.0, 0.0, 1.0]))
+            lateral_norm = np.linalg.norm(lateral)
+            if lateral_norm > 1e-6:
+                lateral /= lateral_norm
+            else:
+                lateral = np.array([1.0, 0.0, 0.0])
+            p_hit_new = p_hit_new + lateral * effective_sp
 
     # 4. 法向量和随挥目标
     n_des_new = -v_ball_hit_new / (np.linalg.norm(v_ball_hit_new) + 1e-8)
     if cfg.get("normal_flip", False):
         n_des_new = -n_des_new
 
+    # v5: 终端目标 = 随挥终点（击球点前方 follow_through_length）
     p_follow_new = p_hit_new + cfg["hit_shift"] * cfg["d_hat"]
 
-    # 5. 更新 cost_fn（在主线程中完成，这里只记录信息）
-    horizon_full = k_hit_new
+    # v5: 扩展 horizon 包含随挥段，击球时刻变为轨迹中段
+    follow_through_steps_cfg = cfg.get("follow_through_steps", 60)
+    follow_through_length_cfg = cfg.get("follow_through_length", 0.5)
+    follow_through_v_terminal_cfg = cfg.get("follow_through_v_terminal", 0.3)
+    horizon_full = k_hit_new + follow_through_steps_cfg  # v5: 终端在随挥终点
     horizon_plan = min(horizon_full, cfg["fixed_horizon"])
+
+    # v5: 终端目标 = 随挥终点（低速），iLQR 规划"加速→击球→减速→终点"
+    p_terminal_v5 = p_hit_new + follow_through_length_cfg * cfg["d_hat"]
+    v_terminal_v5 = follow_through_v_terminal_cfg * cfg["d_hat"]
 
     # 6. 位置误差 → 权重调度
     env_plan.set_arm_state(x_current)
@@ -1377,7 +1613,8 @@ def do_replan(
         Q_p_scale = cfg["Q_p_scale_near"] + (cfg["Q_p_scale_far"] - cfg["Q_p_scale_near"]) * ratio
         Q_v_scale = cfg["Q_v_scale_near"] + (cfg["Q_v_scale_far"] - cfg["Q_v_scale_near"]) * ratio
 
-    # 7. 迭代策略
+    # 7. 迭代策略（与主循环同步策略保持一致）
+    near_threshold = cfg["near_threshold"]
     iters_plan = cfg["max_iter_per_plan"]
     skip_ls = True
     fp_limits = cfg["robot_limits"]
@@ -1385,10 +1622,14 @@ def do_replan(
 
     if request.is_first_plan:
         iters_plan = cfg["first_plan_iters"]
-        skip_ls = False
-    elif k_hit_new <= cfg["near_threshold"]:
+        skip_ls = True
+        fp_limits = None
+    elif k_hit_new <= near_threshold:
         iters_plan = cfg["near_plan_iters"]
         if k_hit_new > 30:
+            fast_lin = True
+            fp_limits = None
+        else:
             fast_lin = True
             fp_limits = None
     else:
@@ -1416,7 +1657,7 @@ def do_replan(
                 U_warm = fix_joint5_control_trajectory(U_warm, x_current, env_plan, fix_joint5_angle)
         else:
             U_warm_full, _ = generate_backswing_warm_start(
-                env_plan, x_current, p_follow_new, cfg["v_hit_desired"], horizon_full,
+                env_plan, x_current, p_follow_new, cfg.get("v_hit_at_contact", cfg["v_hit_desired"]), horizon_full,
                 backswing_offset=cfg.get("backswing_offset", 0.0),
                 backswing_ratio=cfg.get("backswing_ratio", 0.3),
                 fix_joint5_angle=fix_joint5_angle,
@@ -1424,18 +1665,44 @@ def do_replan(
             )
             U_warm = U_warm_full[:horizon_plan]
 
-    # 9. 构建 cost_fn（使用临时 cost_fn 避免修改主线程的 cost_fn）
-    Q_p = Q_p_scale * np.eye(3)
-    Q_v = Q_v_scale * np.eye(3)
+    # 9. 构建 cost_fn（使用临时 cost_fn，env_plan 独立 MjData）
+    Q_p_mat = Q_p_scale * np.eye(3)
+    # v4: 方向对齐速度代价 — 只惩罚沿 d_follow 方向
+    d_follow = cfg.get("d_follow", np.array([0.0, -1.0, 0.0]))
+    Q_v_scalar = cfg.get("Q_v_scalar", 400.0)
+    Q_v_mat = Q_v_scale * Q_v_scalar * np.outer(d_follow, d_follow)
     R_mat = cfg["R"] * np.eye(env_plan.NU)
     cost_fn_plan = HittingCost(
-        env_plan, p_follow_new, cfg["v_hit_desired"], Q_p, Q_v, R_mat,
+        env_plan, p_terminal_v5, v_terminal_v5, Q_p_mat, Q_v_mat, R_mat,
         n_des=n_des_new if cfg.get("Q_n", 0) > 0 else None,
     )
 
     if cfg.get("use_r_decay", False):
-        R_schedule = compute_r_schedule(horizon_full, cfg["R"], decay_ratio=cfg.get("r_decay_ratio", 0.3))[:horizon_plan]
+        R_schedule = compute_r_schedule(
+            horizon_full, cfg["R"],
+            decay_ratio=cfg.get("r_decay_ratio", 0.3),
+        )[:horizon_plan]
         cost_fn_plan.set_R_schedule(R_schedule)
+
+    # v5: 中途位置目标 — 在 k_hit 步强制经过击球位置 + 鼓励高速
+    if k_hit_new > 0 and k_hit_new < horizon_plan:
+        Q_midpoint = Q_p_mat * 2.0
+        Q_midpoint_v = Q_v_mat * 5.0  # 速度代价权重（高权重鼓励击球时高速）
+        cost_fn_plan.set_midpoint_target(k_hit_new, p_hit_new, Q_midpoint,
+                                         v_target=cfg["v_hit_at_contact"],
+                                         Q_midpoint_v=Q_midpoint_v)
+
+    # 分阶段软平滑权重调度
+    if hasattr(cost_fn_plan, 'set_smoothness_scale'):
+        if k_hit_new > 50:
+            sq = cfg.get("smooth_far", {"Q_qdot_mult": 0.01, "Q_qddot_mult": 0.01, "Q_du_mult": 0.1})
+        elif k_hit_new > 20:
+            sq = cfg.get("smooth_mid", {"Q_qdot_mult": 0.1,  "Q_qddot_mult": 0.1,  "Q_du_mult": 0.2})
+        else:
+            sq = cfg.get("smooth_near", {"Q_qdot_mult": 1.0,  "Q_qddot_mult": 1.0,  "Q_du_mult": 0.5})
+        cost_fn_plan.set_smoothness_scale(
+            float(sq["Q_qdot_mult"]), float(sq["Q_qddot_mult"]), float(sq["Q_du_mult"]),
+        )
 
     # 10. 求解 iLQR
     ball_pos_save, ball_vel_save = env_plan.get_ball_state()
@@ -1452,6 +1719,7 @@ def do_replan(
     env_plan.set_arm_state(x_current)
 
     # 11. 构建 PlanResult
+    result.request_step = step
     result.k_hit_new = k_hit_new
     result.p_hit_new = p_hit_new
     result.v_ball_hit_new = v_ball_hit_new
@@ -1461,10 +1729,12 @@ def do_replan(
     result.horizon_plan = horizon_plan
     result.fast_lin = fast_lin
     result.fp_limits_was_none = (fp_limits is None)
+    result.U_mpc_full = U_mpc.copy()
 
     if solver_ok:
         if fix_joint5_angle is not None:
             U_mpc = fix_joint5_control_trajectory(U_mpc, x_current, env_plan, fix_joint5_angle)
+            result.U_mpc_full = U_mpc.copy()
 
         # U_prev：保存规划尾部，用于下次 warm start
         if len(U_mpc) > cfg["replan_interval"]:
@@ -1472,11 +1742,17 @@ def do_replan(
         elif len(U_mpc) > 0:
             result.U_prev = U_mpc[1:].copy()
 
-        # U_buffer：近阶段不截断，产出尽可能长的控制序列
-        if k_hit_new <= 30 and len(U_mpc) >= cfg["replan_interval"] * 2:
-            result.U_buffer = U_mpc[:cfg["replan_interval"] * 2].copy()
+        # U_buffer：异步模式需更长 buffer 覆盖后台规划延迟（≈horizon×0.2ms/步）
+        # 远段 horizon~100 → ~200ms ≈ 40步，buffer 取 60步（×1.5余量）
+        buffer_interval = cfg["replan_interval"]
+        if len(U_mpc) >= buffer_interval * 6:
+            result.U_buffer = U_mpc[:buffer_interval * 6].copy()
+        elif len(U_mpc) >= buffer_interval * 4:
+            result.U_buffer = U_mpc[:buffer_interval * 4].copy()
+        elif k_hit_new <= 30 and len(U_mpc) >= buffer_interval * 2:
+            result.U_buffer = U_mpc[:buffer_interval * 2].copy()
         else:
-            result.U_buffer = U_mpc[:cfg["replan_interval"]].copy()
+            result.U_buffer = U_mpc[:min(len(U_mpc), buffer_interval)].copy()
     else:
         # fallback: JT 控制
         u_jt = compute_jacobian_init_control(
@@ -1522,25 +1798,46 @@ def main() -> None:
     parser.add_argument("--normal-weight", type=float, default=500000.0, help="拍面法向量代价权重")
     parser.add_argument("--normal-flip", action="store_true", help="翻转法向量方向")
     parser.add_argument("--replan-interval", type=int, default=None, help="重规划间隔步数")
+    parser.add_argument("--near-iters", type=int, default=None, help="near阶段 iLQR 迭代次数 (默认20)")
     parser.add_argument("--window-ms", type=float, default=50.0, help="Tube 候选窗口半宽 (ms)")
-    parser.add_argument("--sigma0", type=float, default=0.02, help="初始不确定性半径 (m)")
     parser.add_argument("--tube-cost-ratio", type=float, default=0.3, help="Tube 代价占比 (0~1)")
+    parser.add_argument("--softmin-beta", type=float, default=5.0,
+                        help="终端 softmin 锐度 β (1~20)，越大越接近 hard-min")
+    parser.add_argument("--no-softmin", action="store_true",
+                        help="禁用多终端 softmin（退化为单点终端代价）")
     parser.add_argument("--no-plot", action="store_true", help="禁用 matplotlib 可视化")
+    parser.add_argument("--dump-trajectory", type=str, default=None,
+                        help="将轨迹数据保存到指定 pickle 文件路径")
     parser.add_argument("--realtime", action="store_true", help="模拟实时节奏（5ms/步），使异步重规划结果可被应用")
+    parser.add_argument("--async-replan", action="store_true", help="启用异步重规划（后台线程 iLQR，主线程不阻塞）")
     parser.add_argument("--time-perturb-ms", type=float, default=0.0,
                         help="球到达时间预测扰动 (ms): 正值=MPC认为球早到，负值=认为球晚到")
     parser.add_argument("--space-perturb-m", type=float, default=0.0,
                         help="击打点空间偏移 (m): 对 p_hit 施加侧向偏移，测试 tube 空间走廊的鲁棒性")
+    parser.add_argument("--perturb-alpha-min", type=float, default=0.0,
+                        help="衰减扰动保底值 (0~1): alpha=max(alpha_min, 1-count/total), 0=衰减到0, 0.3=保留30%%残余偏差")
+    parser.add_argument("--ball-speed-perturb-pct", type=float, default=0.0,
+                        help="球速耦合扰动百分比 (%%): 实际发球速度=ball_speed*(1+pct/100), MPC规划仍用标称球速")
+    parser.add_argument("--max-tcp", type=float, default=None,
+                        help="TCP 线速度硬限制 (m/s), 默认从配置文件读取, 0=不限速")
+    parser.add_argument("--terminal-exempt-steps", type=int, default=None,
+                        help="终段 qdot/TCP 豁免步数 (0=全程硬限), 默认从配置文件读取")
     args = parser.parse_args()
 
     use_tube = args.use_tube.lower() in ("true", "1", "yes")
     use_analytical = not args.fd
     time_perturb_s = args.time_perturb_ms / 1000.0
     space_perturb_m = args.space_perturb_m
+    perturb_alpha_min = args.perturb_alpha_min
 
     # 加载配置
-    base_path = Path(__file__).resolve().parent.parent / "configs"
+    base_path = Path(__file__).resolve().parent.parent.parent / "configs"
     config_dict = load_config(base_path / "default.yaml")
+    # v5: 叠加 v5 主动击打配置
+    v5_config_path = base_path / "v5_active_hit.yaml"
+    if v5_config_path.exists():
+        v5_config = load_config(v5_config_path)
+        config_dict = merge_configs(config_dict, v5_config)
     mpc_config_path = base_path / "mpc.yaml"
     if mpc_config_path.exists():
         mpc_config = load_config(mpc_config_path)
@@ -1564,6 +1861,8 @@ def main() -> None:
     first_plan_iters = 15
     near_plan_iters = 20
 
+    if args.near_iters is not None:
+        near_plan_iters = args.near_iters
     if args.horizon is not None:
         fixed_horizon = args.horizon
     if args.iter is not None:
@@ -1578,12 +1877,14 @@ def main() -> None:
         if args.iter is None:
             max_iter_per_plan = 10
         if args.replan_interval is None:
-            replan_interval = 10
+            replan_interval = 20
+        if args.near_iters is None:
+            near_plan_iters = 5
         first_plan_iters = max(first_plan_iters, 30)
         total_horizon = max(total_horizon, 250)
         logger.info(f"serve-box auto params: horizon={fixed_horizon}, iter={max_iter_per_plan}, "
                      f"first_plan_iters={first_plan_iters}, total_horizon={total_horizon}, "
-                     f"replan_interval={replan_interval}")
+                     f"replan_interval={replan_interval}, near_plan_iters={near_plan_iters}")
 
     init_q = np.array([-1.5, 1.57, -0.236, 0.404, 0.446, 2.45], dtype=np.float64)
     init_q_left = np.array([-0.373, -1.57, 0.236, -0.404, -0.446, -2.45], dtype=np.float64)
@@ -1598,32 +1899,43 @@ def main() -> None:
     # Tube 配置
     tube_cfg = TubeConfig(
         window_half_ms=args.window_ms,
-        sigma0=args.sigma0,
         Q_p_tube=float(config_dict["cost"]["Q_p"][0]) * 2.0,
-        Q_v_tube=float(config_dict["cost"]["Q_v"][0]) * 50.0,  # 强化速度方向对齐
+        Q_v_tube=float(config_dict["cost"]["Q_v"][0]) * 50.0,
         Q_n_tube=args.normal_weight,
         tube_cost_ratio=args.tube_cost_ratio,
+        softmin_beta=args.softmin_beta,
+        use_softmin_terminal=not args.no_softmin,
     )
 
     # 初始化 RM-65 环境
-    model_path = Path(__file__).resolve().parent.parent / "src" / "robot" / "rm65_model.xml"
+    model_path = Path(__file__).resolve().parent.parent.parent / "src" / "robot" / "rm65_model.xml"
     env = RM65Env(model_path, dt=dt)
     env.init_q_left = init_q_left
 
     # 加载真实机器人硬约束
     rl_cfg = config_dict.get("robot_limits", {})
+    if args.max_tcp is not None:
+        if args.max_tcp == 0:
+            rl_cfg["max_tcp_speed"] = float("inf")
+        else:
+            rl_cfg["max_tcp_speed"] = args.max_tcp
+    if args.terminal_exempt_steps is not None:
+        rl_cfg["terminal_exempt_steps"] = args.terminal_exempt_steps
     robot_limits = RobotLimits.from_config(
         rl_cfg, dt=dt,
         ctrlrange=env.model.actuator_ctrlrange[:env.NU],
     )
     logger.info(
         "RobotLimits: q_lower=%.1f°(j0)/%.1f°(j3), qdot_max=%.1f°/s (scaled), "
-        "qddot_max=%.1f°/s² (scaled), u_range=[%.1f, %.1f]Nm",
+        "qddot_max=%.1f°/s² (scaled), u_range=[%.1f, %.1f]Nm, "
+        "max_tcp=%.1f m/s, exempt=%d步",
         float(robot_limits.q_lower[0] * 180 / np.pi),
         float(robot_limits.q_lower[3] * 180 / np.pi),
         float(np.max(robot_limits.qdot_max) * 180 / np.pi),
         float(np.max(robot_limits.qddot_max) * 180 / np.pi) if np.isfinite(robot_limits.qddot_max[0]) else float("inf"),
         float(robot_limits.u_min[0]), float(robot_limits.u_max[0]),
+        robot_limits.max_tcp_speed if np.isfinite(robot_limits.max_tcp_speed) else -1.0,
+        robot_limits.terminal_exempt_steps,
     )
 
     # 硬约束 body ID 缓存（初始化一次）
@@ -1773,15 +2085,34 @@ def main() -> None:
         n_des_single = -n_des_single
 
     near_threshold = max(50, k_hit_total // 3)
-    far_threshold = k_hit_total  # far 阶段始终走 iLQR（JT 控制精度不够）
+    far_threshold = 50  # 实时模式：远段用 JT 控制（0ms），仅近段用 iLQR
 
     hit_direction = np.array(config_dict["hitting"]["hit_direction"], dtype=np.float64)
     racket_speed = float(config_dict["hitting"]["racket_speed"])
-    v_hit_desired = compute_desired_hit_velocity(hit_direction, racket_speed)
 
-    hit_shift = args.hit_shift
-    d_hat = hit_direction / (np.linalg.norm(hit_direction) + 1e-8)
-    p_follow = p_hit + hit_shift * d_hat
+    # ===== v4: 随挥方向 = 来球反方向 =====
+    d_follow = -v_ball_hit / (np.linalg.norm(v_ball_hit) + 1e-8)
+    d_hat = d_follow  # v4: 用来球反方向替代固定 hit_direction
+
+    # v4: 击球时刻期望速度 = TCP 限制
+    v_hit_at_contact = racket_speed * d_follow  # 1.8 m/s 沿来球反方向
+
+    # v4: 随挥管道参数
+    follow_through_length = float(config_dict["hitting"].get("follow_through_length", 0.4))
+    follow_through_steps = int(config_dict["hitting"].get("follow_through_steps", 40))
+    follow_through_v_terminal = float(config_dict["hitting"].get("follow_through_v_terminal", 0.3))
+
+    # v4: 终端目标点 = 击球点 + 小偏移（与 v2 相同）
+    p_follow = p_hit + 0.01 * d_follow
+    # v4: 终端速度 = 击球时刻期望速度（1.8 m/s），iLQR 在终端（=击打时刻）最大化此速度
+    v_hit_desired = v_hit_at_contact  # 1.8 m/s 沿来球反方向
+
+    hit_shift = 0.01  # v4: 与 v2 相同，小偏移
+
+    # v4: 随挥管道参数（击打后 PD 控制）
+    follow_through_length = float(config_dict["hitting"].get("follow_through_length", 0.4))
+    follow_through_steps = int(config_dict["hitting"].get("follow_through_steps", 40))
+    follow_through_v_terminal = float(config_dict["hitting"].get("follow_through_v_terminal", 0.3))
 
     # ===== 构建初始 Tube（若启用） =====
     hit_window: HitWindow | None = None
@@ -1797,7 +2128,7 @@ def main() -> None:
         )
         if hit_window is not None:
             hitting_tube = build_hitting_tube(
-                hit_window, racket_speed, hit_direction, tube_cfg,
+                hit_window, racket_speed, d_follow, tube_cfg,
             )
             logger.info(
                 f"Tube 已构建: best_k={hitting_tube.best_k}, "
@@ -1809,14 +2140,22 @@ def main() -> None:
             use_tube = False
 
     logger.info(f"击打步数: {k_hit_total}, 击打位置: {p_hit}")
-    if hit_shift > 0:
-        logger.info(f"随挥偏移: {hit_shift:.3f}m, 随挥目标: {p_follow}")
+    logger.info(f"[v5] 随挥方向(来球反方向): {np.round(d_follow, 3)}")
+    logger.info(f"[v5] 击球时刻期望速度: {racket_speed} m/s")
+    logger.info(f"[v5] 终端目标点: {np.round(p_follow, 3)}, 终端速度: {np.linalg.norm(v_hit_desired):.1f} m/s")
+    logger.info(f"[v5] 随挥距离: {follow_through_length:.2f}m, 随挥步数: {follow_through_steps}")
     logger.info(f"Tube 模式: {'启用' if use_tube else '禁用'}")
     logger.info(f"线性化: {'解析' if use_analytical else '有限差分'}, horizon={fixed_horizon}")
 
     # ===== 初始化 =====
     Q_p = np.array(config_dict["cost"]["Q_p"], dtype=np.float64) * 2.0
-    Q_v = np.array(config_dict["cost"]["Q_v"], dtype=np.float64) * 2.0
+    # v4: 方向对齐速度代价 — 只惩罚沿 d_follow 方向的速度偏差
+    # Q_v_scalar 远大于原始 Q_v，但只作用在 1 个方向上，等效应力 ≈ Q_v_scalar
+    Q_v_scalar = 10000.0  # v4: 方向对齐速度代价标量（远大于原始 400）
+    Q_v = Q_v_scalar * np.outer(d_follow, d_follow)  # (3,3) 秩1矩阵
+    logger.info(f"[v5] Q_v 方向对齐: scalar={Q_v_scalar}, d_follow={np.round(d_follow, 3)}")
+    logger.info(f"[v5] 终端 = 随挥终点: p_terminal={np.round(p_hit + follow_through_length * d_follow, 3)}, "
+                f"v_terminal={follow_through_v_terminal:.1f} m/s, horizon=+{follow_through_steps}步")
     R = float(config_dict["cost"]["R"])
     ilqt_cfg = dict(config_dict["ilqt"])
 
@@ -1824,7 +2163,7 @@ def main() -> None:
 
     if use_backswing:
         U_prev, q_des_traj_init = generate_backswing_warm_start(
-            env, x0, p_target_init, v_hit_desired, k_hit_total,
+            env, x0, p_target_init, v_hit_at_contact, k_hit_total,
             backswing_offset=backswing_offset,
             backswing_ratio=backswing_ratio,
             fix_joint5_angle=fix_joint5_angle,
@@ -1855,7 +2194,9 @@ def main() -> None:
         if use_r_decay else None
     )
 
-    # 创建基础代价函数（无软约束，硬约束在执行层处理）
+    # [v5] 创建基础代价函数 — 终端=p_follow（初始为击球点附近）
+    # 注意: 在 do_replan() 和 MPC 重规划中，终端会被更新为随挥终点 p_hit+0.5m
+    # 下面的 midpoint 是 v5 的核心改进: 在 k_hit 步强制经过 p_hit + 匹配速度
     base_cost_fn = HittingCost(
         env, p_follow, v_hit_desired, Q_p, Q_v, R,
         Q_p_running=0.0,
@@ -1870,6 +2211,11 @@ def main() -> None:
         Q_du=float(config_dict["cost"].get("Q_du", 0.0)),
     )
 
+    # v5: 初始中途目标 — 在 k_hit 步强制经过击球位置 + 鼓励高速
+    base_cost_fn.set_midpoint_target(k_hit_total, p_hit, Q_p * 2.0,
+                                     v_target=v_hit_at_contact,
+                                     Q_midpoint_v=Q_v * 5.0)
+
     # 创建 Tube 代价包装器（若启用）
     tube_cost_fn: TubeHittingCostWrapper | None = None
     if use_tube and hitting_tube is not None:
@@ -1882,14 +2228,35 @@ def main() -> None:
         cost_fn = base_cost_fn  # type: ignore[assignment]
         logger.info("使用标准 HittingCost（single-hit-point）")
 
+    # ===== 球速耦合扰动：沿飞行方向平移发球位置，保持初速度不变 =====
+    # 正 pct: 发球点沿飞行方向前移 → 球提前到达 → 时间+空间耦合偏移
+    # 负 pct: 发球点沿飞行方向后退 → 球延迟到达
+    ball_speed_perturb_pct = getattr(args, 'ball_speed_perturb_pct', 0.0)
+    if abs(ball_speed_perturb_pct) > 0.01:
+        v0_norm = np.linalg.norm(v0)
+        if v0_norm > 0.1:
+            v0_dir = v0 / v0_norm
+            offset_m = ball_speed_perturb_pct / 100.0 * 2.0  # ±10% → ±2.0m 位移
+            p0_real = p0 + v0_dir * offset_m
+            v0_real = v0.copy()
+            logger.info(
+                f"发球位置耦合扰动: offset={offset_m:+.3f}m 沿飞行方向, "
+                f"p0变化={np.round(p0_real - p0, 3)}"
+            )
+        else:
+            p0_real = p0
+            v0_real = v0
+    else:
+        p0_real = p0
+        v0_real = v0
+
     solver = ILQTSolver(ilqt_cfg, use_analytical=use_analytical)
 
-    # 设置球的初始状态（始终使用原始 p0, v0）
     env.reset(init_q)
     env.data.qpos[env.NQ:env.NQ + env.LEFT_ARM_NQ] = init_q_left
     env.data.qvel[env.NQ:env.NQ + env.LEFT_ARM_NQ] = 0.0
     env.update_kinematics()
-    env.set_ball_state(p0, v0)
+    env.set_ball_state(p0_real, v0_real)
     if abs(time_perturb_s) > 1e-6:
         logger.info(f"球时间预测扰动: {args.time_perturb_ms:+.1f}ms "
                      "(仅影响 MPC 预测，球实际轨迹不变)")
@@ -1903,6 +2270,13 @@ def main() -> None:
     ball_pos_history = [p0.copy()]
     cost_history: list[float] = []
     pos_error_history: list[float] = []
+
+    # 衰减式扰动：记录重规划次数，计算衰减系数
+    replan_count = 0
+    if k_hit_total > 0:
+        total_expected_replans = max(1, k_hit_total // replan_interval)
+    else:
+        total_expected_replans = 1
 
     # Tube 专用记录
     distances_history: list[float] = []
@@ -1934,8 +2308,11 @@ def main() -> None:
     iters = 0
     hit_step = -1
     p_ee_at_hit = None
+    total_sleep_time = 0.0
+    ball_pos_at_hit = None
     q_ik_cache: np.ndarray | None = None
     ball_was_hit = False
+    follow_through_start = -1  # v4: 随挥开始步
 
     buffer_exhaustion_count = 0
     current_n_des = n_des_single.copy()
@@ -2127,7 +2504,128 @@ def main() -> None:
     mid_stage = stage_cfg.get("mid", {"Q_qdot_mult": 2.0, "Q_qddot_mult": 2.0, "Q_du_mult": 2.0})
     near_stage = stage_cfg.get("near", {"Q_qdot_mult": 2.0, "Q_qddot_mult": 2.0, "Q_du_mult": 3.0})
 
-    logger.info(f"开始 MPC 循环，总步数={total_horizon}，击打步数={k_hit_total}")
+    # ---- 异步重规划状态与配置 ----
+    replan_state = ReplanState(
+        k_hit_new=k_hit_total,
+        p_hit_new=p_hit.copy(),
+        v_ball_hit_new=v_ball_hit.copy(),
+        current_n_des=n_des_single.copy(),
+        U_prev=np.zeros((0, env.NU)),
+        is_first_plan=True,
+    )
+    replan_cfg: dict = {
+        "total_horizon": total_horizon,
+        "fixed_horizon": fixed_horizon,
+        "replan_interval": replan_interval,
+        "max_iter_per_plan": max_iter_per_plan,
+        "first_plan_iters": first_plan_iters,
+        "near_plan_iters": near_plan_iters,
+        "near_threshold": near_threshold,
+        "dt": dt,
+        "shoulder_pos": shoulder_pos,
+        "workspace_radius": workspace_radius,
+        "robot_limits": robot_limits,
+        "solver": solver,
+        "R": R,
+        "Q_p_scale_far": Q_p_scale_far,
+        "Q_v_scale_far": Q_v_scale_far,
+        "Q_p_scale_near": Q_p_scale_near,
+        "Q_v_scale_near": Q_v_scale_near,
+        "hit_shift": hit_shift,
+        "d_hat": d_hat,
+        "v_hit_desired": v_hit_desired,
+        "v_hit_at_contact": v_hit_at_contact,
+        "d_follow": d_follow,
+        "Q_v_scalar": Q_v_scalar,
+        "follow_through_length": follow_through_length,
+        "follow_through_steps": follow_through_steps,
+        "follow_through_v_terminal": follow_through_v_terminal,
+        "use_backswing": use_backswing,
+        "use_r_decay": use_r_decay,
+        "r_decay_ratio": r_decay_ratio,
+        "time_perturb_s": time_perturb_s,
+        "space_perturb_m": space_perturb_m,
+        "perturb_alpha_min": perturb_alpha_min,
+        "normal_flip": args.normal_flip,
+        "fix_joint5_angle": fix_joint5_angle,
+        "backswing_offset": backswing_offset,
+        "backswing_ratio": backswing_ratio,
+        "k_hit_total": k_hit_total,
+        "smooth_far": far_stage,
+        "smooth_mid": mid_stage,
+        "smooth_near": near_stage,
+    }
+    async_replanner = AsyncReplanner(env, do_replan, replan_cfg, state=replan_state, model_path=model_path)
+    async_replanner.start()
+    # 确保 env_plan 已创建（用于同步首次规划）
+    _ = async_replanner._ensure_env_plan()
+
+    async_mode = args.async_replan
+
+    # 首次规划同步完成（离线阶段）
+    t_first_start = time.perf_counter()
+    ball_pos_init, ball_vel_init = env.get_ball_state()
+    first_request = PlanRequest(
+        x_current=x_current.copy(),
+        ball_pos=ball_pos_init,
+        ball_vel=ball_vel_init,
+        step=0,
+        k_hit_current=k_hit_total,
+        U_prev=np.zeros((0, env.NU)),
+        p_hit_current=p_hit.copy(),
+        v_hit_desired=v_hit_at_contact,  # v4: 用击球速度（1.8 m/s）做初始控制参考
+        n_des_current=n_des_single.copy(),
+        is_first_plan=True,
+    )
+    first_result = do_replan(first_request, async_replanner.env_plan, replan_state, replan_cfg)
+    t_first_dur = time.perf_counter() - t_first_start
+    replan_times.append(t_first_dur)
+    replan_k_hit_history.append(first_result.k_hit_new)
+    logger.info(
+        f"REPLAN step=0 k_hit={first_result.k_hit_new} iters={first_result.iters_plan} "
+        f"horizon={first_result.horizon_plan} t={t_first_dur*1000:.0f}ms "
+        f"fp_limits={not first_result.fp_limits_was_none} fast_lin={first_result.fast_lin}"
+    )
+    replan_state.is_first_plan = False
+    replan_state.k_hit_new = first_result.k_hit_new
+    replan_state.p_hit_new = first_result.p_hit_new.copy()
+    replan_state.v_ball_hit_new = first_result.v_ball_hit_new.copy()
+    replan_state.current_n_des = first_result.n_des_new.copy()
+    replan_state.U_prev = first_result.U_prev.copy()
+
+    # 从首次规划结果覆盖控制缓冲
+    U_buffer = first_result.U_buffer.copy()
+    buffer_idx = 0
+    async_replan_submitted = False
+
+    # 状态变量（异步模式陈旧规划调整用）
+    k_hit_new = first_result.k_hit_new
+    p_hit_new = first_result.p_hit_new.copy()
+    v_ball_hit_new = first_result.v_ball_hit_new.copy()
+    current_n_des = first_result.n_des_new.copy()
+    p_follow_new = p_hit_new + hit_shift * d_hat
+    n_des_new = current_n_des.copy()
+    U_prev = first_result.U_prev.copy()
+
+    # 立即提交第一个异步重规划请求
+    if async_mode:
+        first_async_request = PlanRequest(
+            x_current=x_current.copy(),
+            ball_pos=ball_pos_init,
+            ball_vel=ball_vel_init,
+            step=0,
+            k_hit_current=k_hit_new,
+            U_prev=U_prev.copy(),
+            p_hit_current=p_hit_new.copy(),
+            v_hit_desired=v_hit_at_contact,  # v4: 初始控制参考用击球速度
+            n_des_current=current_n_des.copy(),
+            is_first_plan=False,
+        )
+        async_replanner.submit(first_async_request)
+        async_replan_submitted = True
+
+    total_horizon += follow_through_steps  # v4: 扩展以包含随挥段
+    logger.info(f"开始 MPC 循环，总步数={total_horizon}，击打步数={k_hit_total}，随挥步数={follow_through_steps}")
 
     for step in range(total_horizon):
         t_step_start = time.perf_counter()
@@ -2180,6 +2678,79 @@ def main() -> None:
 
         need_replan = (step % replan_interval == 0) or (step == 0) or (buffer_idx >= len(U_buffer))
 
+        # ---- 异步模式：检查结果 / 提交请求 ----
+        if async_mode:
+            # 检查已有异步结果
+            if async_replanner.has_new_plan():
+                result = async_replanner.apply_new_plan()
+                if result is not None and result.request_step >= 0 and result.k_hit_new > 0:
+                    async_replan_submitted = False
+                    elapsed = step - result.request_step
+                    if elapsed < len(result.U_mpc_full) and elapsed < result.k_hit_new:
+                        U_shifted = result.U_mpc_full[elapsed:]
+                        k_hit_adjusted = max(1, result.k_hit_new - elapsed)
+                        if len(U_shifted) >= replan_interval:
+                            if len(U_shifted) >= replan_interval * 6:
+                                U_buffer = U_shifted[:replan_interval * 6]
+                            elif len(U_shifted) >= replan_interval * 4:
+                                U_buffer = U_shifted[:replan_interval * 4]
+                            elif len(U_shifted) >= replan_interval * 2:
+                                U_buffer = U_shifted[:replan_interval * 2]
+                            else:
+                                U_buffer = U_shifted[:replan_interval]
+                            buffer_idx = 0
+                            k_hit_new = k_hit_adjusted
+                            p_hit_new = result.p_hit_new.copy()
+                            v_ball_hit_new = result.v_ball_hit_new.copy()
+                            current_n_des = result.n_des_new.copy()
+                            n_des_new = current_n_des.copy()
+                            p_follow_new = p_hit_new + hit_shift * d_hat
+                            p_terminal_async = p_hit_new + follow_through_length * d_hat
+                            v_terminal_async = follow_through_v_terminal * d_hat
+                            base_cost_fn.update_target(p_terminal_async, v_terminal_async, n_des=n_des_new)
+                            replan_state.k_hit_new = k_hit_new
+                            replan_state.p_hit_new = p_hit_new.copy()
+                            replan_state.v_ball_hit_new = v_ball_hit_new.copy()
+                            replan_state.current_n_des = current_n_des.copy()
+                            replan_state.U_prev = result.U_prev.copy()
+                            replan_times.append(result.plan_duration_ms / 1000.0)
+                            replan_k_hit_history.append(result.k_hit_new)
+                            logger.info(
+                                f"ASYNC_APPLY step={step} result_k_hit={result.k_hit_new} "
+                                f"elapsed={elapsed} k_hit_adj={k_hit_adjusted} "
+                                f"t={result.plan_duration_ms:.0f}ms"
+                            )
+                        else:
+                            logger.warning(
+                                f"ASYNC_DISCARD step={step}: 结果陈旧 "
+                                f"elapsed={elapsed}/{len(result.U_mpc_full)}"
+                            )
+                    else:
+                        logger.warning(
+                            f"ASYNC_DISCARD step={step}: 结果过于陈旧 "
+                            f"elapsed={elapsed} > {len(result.U_mpc_full)}"
+                        )
+
+            # 提交新异步请求
+            can_submit = (not async_replan_submitted and not async_replanner.is_planning()
+                          and step > 0)
+            if need_replan and can_submit:
+                request = PlanRequest(
+                    x_current=x_current.copy(),
+                    ball_pos=ball_pos.copy(),
+                    ball_vel=ball_vel.copy(),
+                    step=step,
+                    k_hit_current=k_hit_new,
+                    U_prev=U_prev.copy() if len(U_prev) > 0 else np.zeros((0, env.NU)),
+                    p_hit_current=p_hit_new.copy(),
+                    v_hit_desired=v_hit_desired,
+                    n_des_current=current_n_des.copy(),
+                    is_first_plan=False,
+                )
+                if async_replanner.submit(request):
+                    async_replan_submitted = True
+
+        # ---- 同步模式：阻塞执行重规划 ----
         if need_replan:
             t_replan_start = time.perf_counter()
             remaining_horizon = total_horizon - step
@@ -2190,283 +2761,329 @@ def main() -> None:
             )
 
             if hit_info_new is None:
-                logger.info(f"步 {step}: 球不再可达, 停止 MPC")
-                break
+                if ball_was_hit and follow_through_start < 0:
+                    follow_through_start = step
+                    logger.info(f"步 {step}: 球已击中且飞走，开始随挥 ({follow_through_steps} 步)")
+                elif not ball_was_hit:
+                    logger.info(f"步 {step}: 球不再可达, 停止 MPC")
+                    break
+                hit_info_new = None  # v4: 保持 None，下方检查跳过重规划
 
-            k_hit_candidate = hit_info_new["k_hit"]
-            if k_hit_candidate < max(10, k_hit_new // 4) and k_hit_new > 30:
-                k_hit_candidate = max(1, k_hit_new - replan_interval)
+            if hit_info_new is not None:
+                k_hit_candidate = hit_info_new["k_hit"]
+                if k_hit_candidate < max(10, k_hit_new // 4) and k_hit_new > 30:
+                    k_hit_candidate = max(1, k_hit_new - replan_interval)
 
-            # 对击球时刻施加时间预测扰动（仅偏移 k_hit，不改变 p_hit 和球轨迹）
-            if abs(time_perturb_s) > 1e-6:
-                perturb_steps = int(round(time_perturb_s / dt))
-                k_hit_candidate = k_hit_candidate - perturb_steps
-                k_hit_candidate = max(5, min(k_hit_candidate, remaining_horizon - 1))
+                # 对击球时刻施加时间预测扰动（衰减式）
+                # 扰动随重规划次数线性衰减：初始满扰动，最后衰减到 alpha_min
+                # 模拟预测精度随观测积累逐步提高的真实过程（保留残余系统性偏差）
+                if abs(time_perturb_s) > 1e-6:
+                    replan_count += 1
+                    decay_alpha = max(perturb_alpha_min, 1.0 - replan_count / total_expected_replans)
+                    effective_time_perturb = time_perturb_s * decay_alpha
+                    perturb_steps = int(round(effective_time_perturb / dt))
+                    if perturb_steps != 0:
+                        k_hit_candidate = k_hit_candidate - perturb_steps
+                        k_hit_candidate = max(5, min(k_hit_candidate, remaining_horizon - 1))
 
-            p_hit_new = hit_info_new["p_hit"]
-            v_ball_hit_new = hit_info_new["v_ball_hit"]
-            k_hit_new = k_hit_candidate
+                p_hit_new = hit_info_new["p_hit"]
+                v_ball_hit_new = hit_info_new["v_ball_hit"]
+                k_hit_new = k_hit_candidate
 
-            # 击球点可执行性后过滤：高风险点自动替换为 tube 窗口内更安全的候选
-            p_hit_new, k_hit_new, hit_refine_log = refine_hit_point(
-                p_hit_new, k_hit_new,
-                remaining_horizon, env,
-            )
-
-            # 球速可行性检查：用 FK 估算关节限速下最大末端速度
-            q_hit_feas = env.solve_ik(p_hit_new, q_init=x_current[:env.NQ], max_iter=50, eps=1e-2)
-            env.set_arm_state(np.concatenate([q_hit_feas, np.zeros(env.NQ)]))
-            J_p_feas = env.get_ee_jacp()
-            max_ee_v = float(np.linalg.norm(np.abs(J_p_feas) @ robot_limits.qdot_max))
-            ball_spd = float(np.linalg.norm(v_ball_hit_new))
-            if ball_spd > max_ee_v * 2.0 and step % 40 == 0:
-                logger.warning(
-                    f"步 {step}: 球速 {ball_spd:.1f}m/s 超过关节限速下最大末端速度 "
-                    f"{max_ee_v:.1f}m/s (×1.5={max_ee_v*1.5:.1f})，"
-                    f"建议 --ball-speed {max_ee_v:.0f} 或提前击球"
+                # 击球点可执行性后过滤：高风险点自动替换为 tube 窗口内更安全的候选
+                p_hit_new, k_hit_new, hit_refine_log = refine_hit_point(
+                    p_hit_new, k_hit_new,
+                    remaining_horizon, env,
                 )
 
-            # 对击打点施加空间偏移（仅偏移 p_hit，球轨迹和 tube 走廊不变）
-            if abs(space_perturb_m) > 1e-6:
-                d_ball_hit = v_ball_hit_new / (np.linalg.norm(v_ball_hit_new) + 1e-8)
-                lateral = np.cross(d_ball_hit, np.array([0.0, 0.0, 1.0]))
-                lateral_norm = np.linalg.norm(lateral)
-                if lateral_norm > 1e-6:
-                    lateral /= lateral_norm
-                else:
-                    lateral = np.array([1.0, 0.0, 0.0])
-                p_hit_new = p_hit_new + lateral * space_perturb_m
-
-            n_des_new = -v_ball_hit_new / (np.linalg.norm(v_ball_hit_new) + 1e-8)
-            if args.normal_flip:
-                n_des_new = -n_des_new
-            current_n_des = n_des_new
-            q_ik_cache = None
-
-            p_follow_new = p_hit_new + hit_shift * d_hat
-
-            k_hit_steps_history.append(k_hit_new)
-
-            # ---- 更新 Tube（仅用于评估/监控，不注入 iLQR 代价）----
-            horizon_full = k_hit_new
-            horizon_plan = min(horizon_full, fixed_horizon)
-
-            # 始终更新 base_cost_fn 的目标
-            base_cost_fn.update_target(p_follow_new, v_hit_desired, n_des=n_des_new)
-
-            if use_tube and tube_cost_fn is not None:
-                hit_window = search_hit_window(
-                    env, ball_pos, ball_vel, shoulder_pos, workspace_radius,
-                    remaining_horizon, tube_cfg,
-                    ball_direction="y",
-                    current_step=0,
-                    robot_limits=robot_limits,
-                    init_q=x_current[:env.NQ].copy(),
-                )
-                if hit_window is not None:
-                    hitting_tube = build_hitting_tube(
-                        hit_window, racket_speed, hit_direction, tube_cfg,
-                    )
-                    tube_cost_fn.update_hitting_tube(hitting_tube, horizon=horizon_plan)
-                    tube_cost_fn.update_target(p_follow_new, v_hit_desired, n_des=n_des_new)
-                else:
-                    logger.info(f"步 {step}: Tube 构建失败")
-
-            if use_tube and tube_cost_fn is not None:
-                cost_fn = tube_cost_fn
-            else:
-                cost_fn = base_cost_fn
-
-            if k_hit_new > far_threshold:
-                ball_pos_save_far, ball_vel_save_far = env.get_ball_state()
-                p_target_jt = p_follow_new if use_tube and hitting_tube is not None else p_follow_new
-                u_jt = compute_jacobian_init_control(
-                    env, x_current, p_target_jt, replan_interval, gain=60.0,
-                    fix_joint5_angle=fix_joint5_angle,
-                )
-                env.set_ball_state(ball_pos_save_far, ball_vel_save_far)
-                env.set_arm_state(x_current)
-                U_buffer = u_jt
-                buffer_idx = 0
-                U_prev = np.zeros((0, env.NU))
-                iters = 0
-                replan_times.append(time.perf_counter() - t_replan_start)
-                replan_k_hit_history.append(k_hit_new)
-            else:
-                ball_pos_save, ball_vel_save = env.get_ball_state()
-                env.set_arm_state(x_current)
-                env.update_kinematics()
-                pos_err_now = np.linalg.norm(env.get_ee_pos() - p_hit_new)
-
-                if pos_err_now > 0.10:
-                    Q_p_scale = Q_p_scale_far
-                    Q_v_scale = Q_v_scale_far
-                else:
-                    ratio = pos_err_now / 0.10
-                    Q_p_scale = Q_p_scale_near + (Q_p_scale_far - Q_p_scale_near) * ratio
-                    Q_v_scale = Q_v_scale_near + (Q_v_scale_far - Q_v_scale_near) * ratio
-
-                cost_fn.update_weights(Q_p_scale, Q_v_scale)
-
-                # 分阶段软平滑权重调度
-                if k_hit_new > 50:
-                    s = far_stage
-                elif k_hit_new > 20:
-                    s = mid_stage
-                else:
-                    s = near_stage
-                if hasattr(cost_fn, 'set_smoothness_scale'):
-                    cost_fn.set_smoothness_scale(
-                        float(s["Q_qdot_mult"]),
-                        float(s["Q_qddot_mult"]),
-                        float(s["Q_du_mult"]),
+                # 球速可行性检查：用 FK 估算关节限速下最大末端速度
+                q_hit_feas = env.solve_ik(p_hit_new, q_init=x_current[:env.NQ], max_iter=50, eps=1e-2)
+                env.set_arm_state(np.concatenate([q_hit_feas, np.zeros(env.NQ)]))
+                J_p_feas = env.get_ee_jacp()
+                max_ee_v = float(np.linalg.norm(np.abs(J_p_feas) @ robot_limits.qdot_max))
+                ball_spd = float(np.linalg.norm(v_ball_hit_new))
+                if ball_spd > max_ee_v * 2.0 and step % 40 == 0:
+                    logger.warning(
+                        f"步 {step}: 球速 {ball_spd:.1f}m/s 超过关节限速下最大末端速度 "
+                        f"{max_ee_v:.1f}m/s (×1.5={max_ee_v*1.5:.1f})，"
+                        f"建议 --ball-speed {max_ee_v:.0f} 或提前击球"
                     )
 
-                if use_r_decay:
-                    R_schedule_new = compute_r_schedule(
-                        horizon_full, R, decay_ratio=r_decay_ratio,
-                    )[:horizon_plan]
-                    cost_fn.set_R_schedule(R_schedule_new)
-                else:
-                    cost_fn.set_R_schedule(None)
+                # 对击打点施加空间偏移（衰减式）
+                if abs(space_perturb_m) > 1e-6:
+                    decay_alpha_sp = max(perturb_alpha_min, 1.0 - replan_count / total_expected_replans)
+                    effective_space_perturb = space_perturb_m * decay_alpha_sp
+                    if abs(effective_space_perturb) > 1e-6:
+                        d_ball_hit = v_ball_hit_new / (np.linalg.norm(v_ball_hit_new) + 1e-8)
+                        lateral = np.cross(d_ball_hit, np.array([0.0, 0.0, 1.0]))
+                        lateral_norm = np.linalg.norm(lateral)
+                        if lateral_norm > 1e-6:
+                            lateral /= lateral_norm
+                        else:
+                            lateral = np.array([1.0, 0.0, 0.0])
+                        p_hit_new = p_hit_new + lateral * effective_space_perturb
 
-                iters_plan = max_iter_per_plan
-                skip_ls = True
-                fp_limits = robot_limits
-                fast_lin = False
-                if is_first_plan:
-                    iters_plan = first_plan_iters
-                    skip_ls = True
-                    fp_limits = None
-                    is_first_plan = False
-                elif k_hit_new <= near_threshold:
-                    iters_plan = near_plan_iters
-                    if k_hit_new > 30:
-                        fast_lin = True
-                        fp_limits = None
-                else:
-                    iters_plan = max_iter_per_plan
-                    fast_lin = True
+                n_des_new = -v_ball_hit_new / (np.linalg.norm(v_ball_hit_new) + 1e-8)
+                if args.normal_flip:
+                    n_des_new = -n_des_new
+                current_n_des = n_des_new
+                q_ik_cache = None
 
-                if use_backswing:
-                    q_hit_new_ik = env.solve_ik(
-                        p_hit_new, q_init=x_current[:env.NQ],
-                        max_iter=150, eps=1e-3,
+                p_follow_new = p_hit_new + hit_shift * d_hat
+
+                k_hit_steps_history.append(k_hit_new)
+
+                # v5: 扩展 horizon 包含随挥段
+                horizon_full = k_hit_new + follow_through_steps
+                horizon_plan = min(horizon_full, fixed_horizon)
+
+                # v5: 终端目标 = 随挥终点
+                p_terminal_v5 = p_hit_new + follow_through_length * d_hat
+                v_terminal_v5 = follow_through_v_terminal * d_hat
+                base_cost_fn.update_target(p_terminal_v5, v_terminal_v5, n_des=n_des_new)
+
+                # v5: 中途目标 — 在 k_hit 步强制经过击球位置 + 鼓励高速
+                if k_hit_new > 0 and k_hit_new < horizon_plan:
+                    base_cost_fn.set_midpoint_target(k_hit_new, p_hit_new, Q_p * 2.0,
+                                                     v_target=v_hit_at_contact,
+                                                     Q_midpoint_v=Q_v * 5.0)
+
+                if use_tube and tube_cost_fn is not None:
+                    hit_window = search_hit_window(
+                        env, ball_pos, ball_vel, shoulder_pos, workspace_radius,
+                        remaining_horizon, tube_cfg,
+                        ball_direction="y",
+                        current_step=0,
+                        robot_limits=robot_limits,
+                        init_q=x_current[:env.NQ].copy(),
                     )
-                    if fix_joint5_angle is not None:
-                        q_hit_new_ik[5] = fix_joint5_angle
-
-                    env.set_arm_state(np.concatenate([q_hit_new_ik, np.zeros(env.NQ)]))
-                    J_p_new = env.get_ee_jacp()
-                    qdot_hit_new = np.linalg.lstsq(J_p_new, v_hit_desired, rcond=None)[0]
-                    max_qdot = 3.0
-                    qdot_norm = np.linalg.norm(qdot_hit_new)
-                    if qdot_norm > max_qdot:
-                        qdot_hit_new *= max_qdot / qdot_norm
-
-                    backswing_scale = horizon_full / max(k_hit_total, 1)
-                    q_des_traj_full = np.zeros((horizon_full, env.NQ))
-                    q_des_traj_full[:, 0] = compute_joint1_backswing_trajectory(
-                        x_current[0], x_current[env.NQ],
-                        q_hit_new_ik[0], qdot_hit_new[0],
-                        horizon_full,
-                        backswing_offset=backswing_offset * backswing_scale,
-                        backswing_ratio=backswing_ratio,
-                    )
-                    for j in range(1, env.NQ):
-                        q_des_traj_full[:, j] = np.linspace(x_current[j], q_hit_new_ik[j], horizon_full)
-
-                    q_des_traj_new = q_des_traj_full[:horizon_plan]
-                    cost_fn.set_q_des_traj(q_des_traj_new, Q_joint=Q_joint)
-
-                    if len(U_prev) >= horizon_full // 3:
-                        U_warm = resample_control_sequence(U_prev, horizon_full)[:horizon_plan]
-                        if fix_joint5_angle is not None:
-                            U_warm = fix_joint5_control_trajectory(
-                                U_warm, x_current, env, fix_joint5_angle,
-                            )
+                    if hit_window is not None:
+                        hitting_tube = build_hitting_tube(
+                            hit_window, racket_speed, d_follow, tube_cfg,
+                        )
+                        tube_cost_fn.update_hitting_tube(hitting_tube, horizon=horizon_plan)
+                        tube_cost_fn.update_target(p_terminal_v5, v_terminal_v5, n_des=n_des_new)
                     else:
-                        U_warm_full, _ = generate_backswing_warm_start(
-                            env, x_current, p_follow_new, v_hit_desired, horizon_full,
+                        logger.info(f"步 {step}: Tube 构建失败")
+
+                # 求解器使用 tube_cost_fn（若启用）或 base_cost_fn
+                cost_fn = tube_cost_fn if (use_tube and tube_cost_fn is not None) else base_cost_fn
+
+                if k_hit_new > far_threshold:
+                    ball_pos_save_far, ball_vel_save_far = env.get_ball_state()
+                    p_target_jt = p_follow_new if use_tube and hitting_tube is not None else p_follow_new
+                    u_jt = compute_jacobian_init_control(
+                        env, x_current, p_target_jt, replan_interval, gain=60.0,
+                        fix_joint5_angle=fix_joint5_angle,
+                    )
+                    env.set_ball_state(ball_pos_save_far, ball_vel_save_far)
+                    env.set_arm_state(x_current)
+                    U_buffer = u_jt
+                    buffer_idx = 0
+                    U_prev = U_prev if len(U_prev) > 0 else np.zeros((0, env.NU))
+                    iters = 0
+                    is_first_plan = False
+                    replan_times.append(time.perf_counter() - t_replan_start)
+                    replan_k_hit_history.append(k_hit_new)
+                else:
+                    ball_pos_save, ball_vel_save = env.get_ball_state()
+                    env.set_arm_state(x_current)
+                    env.update_kinematics()
+                    pos_err_now = np.linalg.norm(env.get_ee_pos() - p_hit_new)
+
+                    if pos_err_now > 0.10:
+                        Q_p_scale = Q_p_scale_far
+                        Q_v_scale = Q_v_scale_far
+                    else:
+                        ratio = pos_err_now / 0.10
+                        Q_p_scale = Q_p_scale_near + (Q_p_scale_far - Q_p_scale_near) * ratio
+                        Q_v_scale = Q_v_scale_near + (Q_v_scale_far - Q_v_scale_near) * ratio
+
+                    cost_fn.update_weights(Q_p_scale, Q_v_scale)
+
+                    # 分阶段软平滑权重调度
+                    if k_hit_new > 50:
+                        s = far_stage
+                    elif k_hit_new > 20:
+                        s = mid_stage
+                    else:
+                        s = near_stage
+                    if hasattr(cost_fn, 'set_smoothness_scale'):
+                        cost_fn.set_smoothness_scale(
+                            float(s["Q_qdot_mult"]),
+                            float(s["Q_qddot_mult"]),
+                            float(s["Q_du_mult"]),
+                        )
+
+                    if use_r_decay:
+                        R_schedule_new = compute_r_schedule(
+                            horizon_full, R, decay_ratio=r_decay_ratio,
+                        )[:horizon_plan]
+                        cost_fn.set_R_schedule(R_schedule_new)
+                    else:
+                        cost_fn.set_R_schedule(None)
+
+                    iters_plan = max_iter_per_plan
+                    skip_ls = True
+                    fp_limits = robot_limits
+                    fast_lin = False
+                    if is_first_plan:
+                        iters_plan = first_plan_iters
+                        skip_ls = True
+                        fp_limits = None
+                        is_first_plan = False
+                    elif k_hit_new <= near_threshold:
+                        if k_hit_new > 30:
+                            iters_plan = min(near_plan_iters, max(max_iter_per_plan, 10))
+                            fast_lin = True
+                            fp_limits = None
+                        else:
+                            iters_plan = min(near_plan_iters, 10) if args.realtime else near_plan_iters
+                            fast_lin = True
+                            fp_limits = None
+                    else:
+                        iters_plan = max_iter_per_plan
+                        fast_lin = True
+
+                    if use_backswing:
+                        q_hit_new_ik = env.solve_ik(
+                            p_hit_new, q_init=x_current[:env.NQ],
+                            max_iter=150, eps=1e-3,
+                        )
+                        if fix_joint5_angle is not None:
+                            q_hit_new_ik[5] = fix_joint5_angle
+
+                        env.set_arm_state(np.concatenate([q_hit_new_ik, np.zeros(env.NQ)]))
+                        J_p_new = env.get_ee_jacp()
+                        qdot_hit_new = np.linalg.lstsq(J_p_new, v_hit_at_contact, rcond=None)[0]
+                        max_qdot = 3.0
+                        qdot_norm = np.linalg.norm(qdot_hit_new)
+                        if qdot_norm > max_qdot:
+                            qdot_hit_new *= max_qdot / qdot_norm
+
+                        backswing_scale = horizon_full / max(k_hit_total, 1)
+                        q_des_traj_full = np.zeros((horizon_full, env.NQ))
+                        q_des_traj_full[:, 0] = compute_joint1_backswing_trajectory(
+                            x_current[0], x_current[env.NQ],
+                            q_hit_new_ik[0], qdot_hit_new[0],
+                            horizon_full,
                             backswing_offset=backswing_offset * backswing_scale,
                             backswing_ratio=backswing_ratio,
-                            fix_joint5_angle=fix_joint5_angle,
-                            n_des=n_des_new,
                         )
-                        U_warm = U_warm_full[:horizon_plan]
-                else:
-                    if len(U_prev) >= horizon_full // 3:
-                        U_warm = resample_control_sequence(U_prev, horizon_full)[:horizon_plan]
-                        if fix_joint5_angle is not None:
-                            U_warm = fix_joint5_control_trajectory(
-                                U_warm, x_current, env, fix_joint5_angle,
+                        for j in range(1, env.NQ):
+                            q_des_traj_full[:, j] = np.linspace(x_current[j], q_hit_new_ik[j], horizon_full)
+
+                        q_des_traj_new = q_des_traj_full[:horizon_plan]
+                        cost_fn.set_q_des_traj(q_des_traj_new, Q_joint=Q_joint)
+
+                        if len(U_prev) >= horizon_full // 3:
+                            U_warm = resample_control_sequence(U_prev, horizon_full)[:horizon_plan]
+                            if fix_joint5_angle is not None:
+                                U_warm = fix_joint5_control_trajectory(
+                                    U_warm, x_current, env, fix_joint5_angle,
+                                )
+                        else:
+                            U_warm_full, _ = generate_backswing_warm_start(
+                                env, x_current, p_follow_new, v_hit_desired, horizon_full,
+                                backswing_offset=backswing_offset * backswing_scale,
+                                backswing_ratio=backswing_ratio,
+                                fix_joint5_angle=fix_joint5_angle,
+                                n_des=n_des_new,
                             )
+                            U_warm = U_warm_full[:horizon_plan]
                     else:
-                        U_warm = compute_jacobian_init_control(
-                            env, x_current, p_follow_new, horizon_full, gain=30.0,
-                            fix_joint5_angle=fix_joint5_angle,
-                        )[:horizon_plan]
+                        if len(U_prev) >= horizon_full // 3:
+                            U_warm = resample_control_sequence(U_prev, horizon_full)[:horizon_plan]
+                            if fix_joint5_angle is not None:
+                                U_warm = fix_joint5_control_trajectory(
+                                    U_warm, x_current, env, fix_joint5_angle,
+                                )
+                        else:
+                            U_warm = compute_jacobian_init_control(
+                                env, x_current, p_follow_new, horizon_full, gain=30.0,
+                                fix_joint5_angle=fix_joint5_angle,
+                            )[:horizon_plan]
 
-                X_mpc, U_mpc, iter_costs, solver_ok = solver.solve_few_iters(
-                    env, cost_fn, x_current, U_warm,
-                    max_iter=iters_plan,
-                    skip_linesearch=skip_ls,
-                    limits=fp_limits,
-                    use_fast_lin=fast_lin,
-                )
-
-                env.set_ball_state(ball_pos_save, ball_vel_save)
-                env.set_arm_state(x_current)
-
-                if not solver_ok:
-                    logger.warning(
-                        f"步 {step}: iLQR 部分迭代被拒绝，仍使用部分收敛结果"
+                    X_mpc, U_mpc, iter_costs, solver_ok = solver.solve_few_iters(
+                        env, cost_fn, x_current, U_warm,
+                        max_iter=iters_plan,
+                        skip_linesearch=skip_ls,
+                        limits=fp_limits,
+                        use_fast_lin=fast_lin,
                     )
 
-                if fix_joint5_angle is not None:
-                    U_mpc = fix_joint5_control_trajectory(
-                        U_mpc, x_current, env, fix_joint5_angle,
-                    )
+                    env.set_ball_state(ball_pos_save, ball_vel_save)
+                    env.set_arm_state(x_current)
 
-                if len(U_mpc) > replan_interval:
-                    U_prev = U_mpc[replan_interval:]
-                elif len(U_mpc) > 0:
-                    U_prev = U_mpc[1:]
-                else:
-                    U_prev = np.zeros((0, env.NU))
-
-                U_buffer = U_mpc[:replan_interval]
-                buffer_idx = 0
-
-                # 近距阶段：延长 U_buffer 减少重规划频率
-                if k_hit_new <= 30 and len(U_mpc) >= replan_interval * 2:
-                    U_buffer = U_mpc[:replan_interval * 2]
-                    buffer_idx = 0
-                    logger.debug(
-                        f"步 {step}: near_hit, U_buffer extended to "
-                        f"{len(U_buffer)} steps"
-                    )
-
-                if len(U_mpc) > 0 and len(X_mpc) > len(U_mpc):
-                        m = compute_trajectory_metrics(X_mpc, U_mpc, robot_limits, dt)
-                        logger.debug(
-                            f"步 {step} 求解指标: max_qdot={m.max_qdot_ratio:.2f}x(j{m.max_qdot_joint}), "
-                            f"max_qddot={m.max_qddot_ratio:.2f}x(j{m.max_qddot_joint}), "
-                            f"joint_speed={m.max_joint_speed_rad_s:.1f}rad/s"
+                    if not solver_ok:
+                        logger.warning(
+                            f"步 {step}: iLQR 部分迭代被拒绝，仍使用部分收敛结果"
                         )
 
-                if len(iter_costs) > 0:
-                    cost_history.append(iter_costs[-1])
+                    if fix_joint5_angle is not None:
+                        U_mpc = fix_joint5_control_trajectory(
+                            U_mpc, x_current, env, fix_joint5_angle,
+                        )
 
-                iters = iters_plan
-                t_replan_dur = time.perf_counter() - t_replan_start
-                replan_times.append(t_replan_dur)
-                replan_k_hit_history.append(k_hit_new)
-                logger.info(
-                    f"REPLAN step={step} k_hit={k_hit_new} iters={iters_plan} "
-                    f"horizon={horizon_plan} t={t_replan_dur*1000:.0f}ms "
-                    f"fp_limits={fp_limits is not None} fast_lin={fast_lin}"
-                )
+                    if len(U_mpc) > replan_interval:
+                        U_prev = U_mpc[replan_interval:]
+                    elif len(U_mpc) > 0:
+                        U_prev = U_mpc[1:]
+                    else:
+                        U_prev = np.zeros((0, env.NU))
+
+                    U_buffer = U_mpc[:replan_interval]
+                    buffer_idx = 0
+
+                    # 近距阶段：延长 U_buffer 减少重规划频率
+                    if k_hit_new <= 30 and len(U_mpc) >= replan_interval * 2:
+                        U_buffer = U_mpc[:replan_interval * 2]
+                        buffer_idx = 0
+                        logger.debug(
+                            f"步 {step}: near_hit, U_buffer extended to "
+                            f"{len(U_buffer)} steps"
+                        )
+
+                    if len(U_mpc) > 0 and len(X_mpc) > len(U_mpc):
+                            m = compute_trajectory_metrics(X_mpc, U_mpc, robot_limits, dt)
+                            logger.debug(
+                                f"步 {step} 求解指标: max_qdot={m.max_qdot_ratio:.2f}x(j{m.max_qdot_joint}), "
+                                f"max_qddot={m.max_qddot_ratio:.2f}x(j{m.max_qddot_joint}), "
+                                f"joint_speed={m.max_joint_speed_rad_s:.1f}rad/s"
+                            )
+
+                    if len(iter_costs) > 0:
+                        cost_history.append(iter_costs[-1])
+
+                    iters = iters_plan
+                    t_replan_dur = time.perf_counter() - t_replan_start
+                    replan_times.append(t_replan_dur)
+                    replan_k_hit_history.append(k_hit_new)
+                    logger.info(
+                        f"REPLAN step={step} k_hit={k_hit_new} iters={iters_plan} "
+                        f"horizon={horizon_plan} t={t_replan_dur*1000:.0f}ms "
+                        f"fp_limits={fp_limits is not None} fast_lin={fast_lin}"
+                    )
+                    # 可解释性日志：softmin 权重和走廊 margin 摘要
+                    if (use_tube and tube_cost_fn is not None
+                            and len(tube_cost_fn._last_softmin_alphas) > 0):
+                        alphas = tube_cost_fn._last_softmin_alphas
+                        costs_s = tube_cost_fn._last_softmin_costs
+                        dom_idx = int(np.argmax(alphas))
+                        logger.info(
+                            f"[Softmin] dominant_α={alphas[dom_idx]:.3f} "
+                            f"cost={costs_s[dom_idx]:.1f} | "
+                            f"top3: {', '.join(f'{a:.3f}' for a in sorted(alphas, reverse=True)[:3])}"
+                        )
+                    if (use_tube and tube_cost_fn is not None
+                            and len(tube_cost_fn._last_tube_margins) > 0):
+                        margins = np.array(list(tube_cost_fn._last_tube_margins.values()))
+                        n_active = int(np.sum(margins > 0))
+                        logger.info(
+                            f"[Corridor] margin: min={margins.min()*1000:.1f}mm "
+                            f"max={margins.max()*1000:.1f}mm "
+                            f"active={n_active}/{len(margins)} (hinge>0)"
+                        )
 
         step_is_replan.append(bool(need_replan))
 
@@ -2542,6 +3159,7 @@ def main() -> None:
             x_current, u_xsafe, robot_limits, dt,
             step_predictor=_safety_step,
             k_hit_remaining=k_hit_new,
+            env=env,
         )
         if not ok_filter:
             safety_beta_list = [0.8, 0.6, 0.4, 0.2, 0.0]
@@ -2556,6 +3174,7 @@ def main() -> None:
                     x_current, u_try_s, robot_limits, dt,
                     step_predictor=_safety_step,
                     k_hit_remaining=k_hit_new,
+                    env=env,
                 )
                 if ok_s:
                     u_xsafe = u_try_s
@@ -2635,7 +3254,7 @@ def main() -> None:
             env.set_arm_collision(True)
 
         X_history.append(x_current.copy())
-        U_history.append(u_cmd.copy())
+        U_history.append(u_final.copy())
         ball_pos_history.append(ball_pos.copy())
 
         env.update_kinematics()
@@ -2647,7 +3266,9 @@ def main() -> None:
 
         # 实时节奏：模拟 5ms/步，给异步重规划足够时间完成
         if args.realtime and step_time < dt:
-            time.sleep(dt - step_time)
+            sleep_dur = dt - step_time
+            time.sleep(sleep_dur)
+            total_sleep_time += sleep_dur
 
         if step % 20 == 0 or k_hit_new <= 5:
             tube_info = ""
@@ -2675,6 +3296,7 @@ def main() -> None:
             hit_step = step
             env.update_kinematics()
             p_ee_at_hit = env.get_ee_pos().copy()
+            ball_pos_at_hit = ball_pos.copy()
 
             n_racket = env.get_ee_normal()
             n_hat = n_racket / (np.linalg.norm(n_racket) + 1e-8)
@@ -2689,17 +3311,69 @@ def main() -> None:
             )
             env.set_ball_vel(v_ball_new)
 
-        if ball_was_hit and (step - hit_step) >= 5:
-            logger.info(f"步 {step}: 碰撞完成，停止MPC")
-            break
+        # v4: 碰撞后延迟几步再开始随挥（让碰撞物理完成）
+        if ball_was_hit and follow_through_start < 0 and hit_step >= 0 and (step - hit_step) >= 3:
+            follow_through_start = step
+            logger.info(f"步 {step}: 碰撞后开始随挥 ({follow_through_steps} 步)")
 
-        if k_hit_new <= 1:
-            logger.info(f"步 {step}: 到达击打时刻")
+        # v4: 到达击打时刻后不 break，继续执行随挥段（只触发一次）
+        if k_hit_new <= 1 and follow_through_start < 0:
+            logger.info(f"步 {step}: 到达击打时刻，开始随挥 ({follow_through_steps} 步)")
             hit_step = step if hit_step < 0 else hit_step
             env.update_kinematics()
             if p_ee_at_hit is None:
                 p_ee_at_hit = env.get_ee_pos().copy()
-            break
+            if ball_pos_at_hit is None:
+                ball_pos_at_hit = ball_pos.copy()
+            follow_through_remain = follow_through_steps
+            follow_through_start = step
+
+        # v4: 随挥段 — 使用 PD 控制沿 d_follow 方向匀减速
+        if follow_through_start >= 0:
+            dt_follow = step - follow_through_start
+            if dt_follow < follow_through_steps:
+                # 匀减速轨迹：s(dt) = v_max * dt - 0.5 * a * dt^2
+                # a = v_max / T_follow（从 v_max 匀减到 0）
+                v_max_follow = np.linalg.norm(v_hit_at_contact)  # 1.8 m/s
+                T_follow = follow_through_steps * dt  # 总随挥时间（秒）
+                a_follow = v_max_follow / T_follow if T_follow > 0 else 0.0
+                t_elapsed = dt_follow * dt  # 已过时间（秒）
+                # 期望位置：从击球点沿 d_follow 移动
+                p_des_follow = p_ee_at_hit + d_follow * (v_max_follow * t_elapsed - 0.5 * a_follow * t_elapsed ** 2)
+                # 期望速度：匀减速
+                v_des_follow = d_follow * max(v_max_follow - a_follow * t_elapsed, 0.0)
+
+                # 任务空间 PD + 雅可比转置映射到关节空间
+                env.update_kinematics()
+                p_ee_cur = env.get_ee_pos()
+                J_p = env.get_ee_jacp()[:, :env.NQ]
+                dp = p_des_follow - p_ee_cur
+                Kp_follow = 200.0
+                Kd_follow = 20.0
+                F_follow = Kp_follow * dp - Kd_follow * J_p @ x_current[env.NQ:]
+                u_follow = J_p.T @ F_follow
+                u_follow = np.clip(u_follow,
+                                   env.model.actuator_ctrlrange[:env.NU, 0],
+                                   env.model.actuator_ctrlrange[:env.NU, 1])
+                # v4: TCP 速度限制 — 随挥阶段同样受限于 max_tcp
+                v_ee_follow = J_p @ x_current[env.NQ:]
+                tcp_speed_follow = float(np.linalg.norm(v_ee_follow))
+                max_tcp_limit = float(args.max_tcp) if args.max_tcp and args.max_tcp > 0 else float('inf')
+                if tcp_speed_follow > max_tcp_limit:
+                    scale_factor = max_tcp_limit / tcp_speed_follow
+                    u_follow *= scale_factor
+                x_current = env.step(u_follow)
+                U_history.append(u_follow.copy())
+                X_history.append(x_current.copy())
+                ball_pos_history.append(env.get_ball_pos().copy())
+                continue  # 跳过 MPC 控制，直接进入下一步
+            else:
+                logger.info(f"步 {step}: 随挥完成 ({follow_through_steps} 步)")
+                break
+
+    # ===== 停止异步重规划器 =====
+    if async_mode:
+        async_replanner.stop()
 
     # ===== 记录 MPC 阶段结束时间快照 =====
     t_mpc_end = time.perf_counter()
@@ -2707,7 +3381,8 @@ def main() -> None:
     n_replans = len(replan_times)                  # 总重规划次数
 
     # ===== 击打后继续仿真 =====
-    post_hit_steps = 80
+    # v4: 随挥段已在 MPC 循环内完成，post_hit 仅做短暂停留
+    post_hit_steps = 20
     logger.info(f"击打后继续仿真 {post_hit_steps} 步...")
     for _ in range(post_hit_steps):
         q_hold = x_current[:env.NQ].copy()
@@ -2731,7 +3406,7 @@ def main() -> None:
 
     # ---- 逐步耗时分类 ----
     _s_arr = np.array(step_times)
-    _r_mask = np.array(step_is_replan, dtype=bool)
+    _r_mask = np.array(step_is_replan)
     avg_step_ms = np.mean(_s_arr) * 1000 if len(_s_arr) > 0 else 0
     avg_non_replan_step_ms = np.mean(_s_arr[~_r_mask]) * 1000 if np.any(~_r_mask) else 0
     max_step_ms = np.max(_s_arr) * 1000 if len(_s_arr) > 0 else 0
@@ -2782,13 +3457,15 @@ def main() -> None:
     max_replan_ms = float(np.max(_rt)) if len(_rt) > 0 else 0.0
 
     # ---- 核心实时比率（仅 MPC 控制阶段，不含后仿真） ----
-    mpc_sim_time = n_mpc_steps * dt                                 # MPC 阶段仿真时间
-    mpc_realtime_ratio = mpc_sim_time / t_mpc if t_mpc > 0 else 0   # >1 = 超实时
+    mpc_sim_time = n_mpc_steps * dt
+    t_mpc_compute = t_mpc - total_sleep_time
+    mpc_realtime_ratio = mpc_sim_time / t_mpc_compute if t_mpc_compute > 0 else 0
+    mpc_wall_ratio = mpc_sim_time / t_mpc if t_mpc > 0 else 0
 
     logger.info(
         f"MPC 完成: MPC={t_mpc:.2f}s/{n_mpc_steps}步, "
         f"后仿真={t_post_hit:.2f}s/{n_post_actual}步, "
-        f"MPC实时比率={mpc_realtime_ratio:.2f}x, "
+        f"MPC实时比率={mpc_realtime_ratio:.2f}x(纯计算)/{mpc_wall_ratio:.2f}x(含sleep), "
         f"重规划={n_replans}次 首次={first_replan_ms:.0f}ms 稳态avg={avg_steady_replan_ms:.0f}ms"
     )
 
@@ -2798,8 +3475,13 @@ def main() -> None:
         env.set_arm_state(x_current)
         p_ee_final = env.get_ee_pos()
     v_ee_final = env.get_ee_vel()
-    pos_error = np.linalg.norm(p_ee_final - p_hit)
-    vel_error = np.linalg.norm(v_ee_final - v_hit_desired)
+    pos_error_plan = np.linalg.norm(p_ee_final - p_hit)
+    if ball_pos_at_hit is not None:
+        pos_error = np.linalg.norm(p_ee_final - ball_pos_at_hit)
+    else:
+        pos_error = pos_error_plan
+    # v4: 速度误差对比击球时刻期望速度（1.8 m/s），而不是终端速度
+    vel_error = np.linalg.norm(v_ee_final - v_hit_at_contact)
 
     ball_vel_after = env.get_ball_vel()
     ball_speed_after = np.linalg.norm(ball_vel_after)
@@ -2846,7 +3528,7 @@ def main() -> None:
         hit_time_actual = hit_step * dt
         hit_time_expected = k_hit_total * dt
         hit_time_error = abs(hit_time_actual - hit_time_expected) * 1000  # ms
-        hit_position_error = float(np.linalg.norm(p_ee_at_hit - p_hit))
+        hit_position_error = float(np.linalg.norm(p_ee_at_hit - ball_pos_at_hit)) if ball_pos_at_hit is not None else float(np.linalg.norm(p_ee_at_hit - p_hit))
     else:
         hit_time_error = 0.0
         hit_position_error = pos_error
@@ -2869,15 +3551,34 @@ def main() -> None:
                 best_candidate_cost = total_i
 
     # ---- 打印评估结果 ----
+    ball_racket_threshold = 0.033 + 0.12  # 球半径 + 球拍半径
     print("\n========================================")
     if pos_error < 0.05:
-        print("  RM-65 击打成功！（误差 < 5cm）")
+        print("  RM-65 击打成功！（球-拍距离 < 5cm，精准命中）")
+    elif pos_error < ball_racket_threshold:
+        print(f"  RM-65 击打命中！（球-拍距离 {pos_error:.4f}m < {ball_racket_threshold:.3f}m 物理接触阈值）")
     elif pos_error < 0.1:
-        print("  RM-65 击打基本命中！（误差 < 10cm）")
+        print("  RM-65 击打接近！（球-拍距离 < 10cm，未物理接触但接近）")
     else:
         print("  RM-65 击打偏差较大，需要调整参数。")
 
     print(f"  Tube 模式: {'启用' if use_tube or hitting_tube is not None else '禁用'}")
+    # ---- v2 可解释性诊断 ----
+    if use_tube and tube_cost_fn is not None:
+        print(f"  --- v2 Tube 可解释性诊断 ---")
+        if len(tube_cost_fn._last_softmin_alphas) > 0:
+            alphas = tube_cost_fn._last_softmin_alphas
+            costs_s = tube_cost_fn._last_softmin_costs
+            print(f"  P0-2 Softmin终端: 候选数={len(alphas)}, beta={tube_cost_fn._softmin_beta:.1f}")
+            top_n = min(5, len(alphas))
+            top_idx = np.argsort(alphas)[::-1][:top_n]
+            for rank, i in enumerate(top_idx):
+                print(f"    #{rank+1}: α={alphas[i]:.4f}, cost={costs_s[i]:.1f}")
+        if len(tube_cost_fn._last_tube_margins) > 0:
+            margins = np.array(list(tube_cost_fn._last_tube_margins.values()))
+            n_active = int(np.sum(margins > 0))
+            print(f"  走廊激活: {n_active}/{len(margins)} 步 margin>0 (hinge激活) | "
+                  f"margin范围=[{margins.min()*1000:.1f}, {margins.max()*1000:.1f}]mm")
     if initial_tube_n_candidates > 0:
         print(f"  初始候选窗口: {initial_tube_n_candidates} 步 {initial_tube_k_range} "
               f"(半宽 {args.window_ms:.0f}ms)")
@@ -2887,7 +3588,10 @@ def main() -> None:
         print(f"  球空间偏移: {args.space_perturb_m:+.3f} m (实际球轨迹侧偏，MPC用原始预测)")
     print(f"  击打目标位置: {np.round(p_hit_new, 3)}")
     print(f"  末端实际位置: {np.round(p_ee_final, 3)}")
-    print(f"  位置误差: {pos_error:.4f} m")
+    if ball_pos_at_hit is not None:
+        print(f"  击球时刻球位置: {np.round(ball_pos_at_hit, 3)}")
+        print(f"  实际球-拍距离: {pos_error:.4f} m")
+    print(f"  规划跟踪误差: {pos_error_plan:.4f} m")
     print(f"  速度误差: {vel_error:.4f} m/s")
     print(f"  击打后球速: {ball_speed_after:.2f} m/s")
     print(f"  MPC 总步数: {n_steps}")
@@ -2910,7 +3614,8 @@ def main() -> None:
     print(f"  --- 计算性能 ---")
     print(f"  总墙钟时间: {t_total:.2f}s")
     print(f"    MPC 计算阶段: {t_mpc:.2f}s ({n_mpc_steps}步, 仿真时间={mpc_sim_time:.3f}s)")
-    print(f"    MPC 实时比率: {mpc_realtime_ratio:.2f}x (仿真/墙钟, >1=超实时, <1=慢于实时)")
+    print(f"    MPC 实时比率: {mpc_realtime_ratio:.2f}x (纯计算, >1=超实时)")
+    print(f"    MPC 含sleep:  {mpc_wall_ratio:.2f}x (含 sleep={total_sleep_time*1000:.0f}ms)")
     print(f"    后仿真阶段:   {t_post_hit:.2f}s ({n_post_actual}步, PD保持)")
     print(f"  --- 重规划性能 ({n_replans}次) ---")
     print(f"    首次规划(冷启动): {first_replan_ms:.0f}ms (不纳入实时预算, 部署时球到达前完成)")
@@ -2949,9 +3654,38 @@ def main() -> None:
     print(f"  击球类型: {hit_type}")
     print("========================================\n")
 
+    # 结构化结果行（供批量实验脚本解析，固定英文格式）
+    hit_type_en = "active" if active_contact else ("passive" if passive_contact else "miss")
+    print(f"__RESULT__: pos_error={pos_error:.6f} vel_error={vel_error:.6f} "
+          f"min_dist={min_dist:.6f} ball_near_ms={ball_near_ms:.1f} "
+          f"tube_ready_ms={tube_ready_ms:.1f} max_tcp={exec_metrics.max_tcp_speed:.2f} "
+          f"max_qdot={exec_metrics.max_qdot_ratio:.2f} hit_type={hit_type_en} "
+          f"hit_time_error_ms={hit_time_error:.1f} hit_pos_error={hit_position_error:.6f}")
+
+    # ===== 保存轨迹 =====
+    if args.dump_trajectory:
+        import pickle as _pickle
+        traj_data = {
+            "X_history": X_history,
+            "U_history": U_history,
+            "ball_pos_history": ball_pos_history,
+            "init_q": init_q,
+            "init_q_left": init_q_left,
+            "pos_error": pos_error,
+            "hit_type": hit_type_en,
+            "p0": p0_real if 'p0_real' in dir() else p0,
+            "v0": v0_real if 'v0_real' in dir() else v0,
+            "hit_step": hit_step,
+            "post_hit_steps": post_hit_steps,
+        }
+        dump_path = Path(args.dump_trajectory)
+        dump_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(dump_path, "wb") as _f:
+            _pickle.dump(traj_data, _f)
+
     # ===== 可视化 =====
     if not args.no_plot:
-        results_dir = Path(__file__).resolve().parent.parent / "results"
+        results_dir = Path(__file__).resolve().parent.parent.parent / "results"
         tag = f"tube_{args.seed or 'default'}"
         ball_arr = np.array(ball_pos_history)
         racket_arr = np.array([X_history[i][:3] if i < len(X_history) else np.zeros(3)

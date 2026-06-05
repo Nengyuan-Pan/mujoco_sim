@@ -11,6 +11,8 @@ import numpy as np
 import mujoco
 from pathlib import Path
 
+from src.utils.mujoco_loader import load_mujoco_model
+
 
 class RM65Env:
     """RM-65 双臂机器人 MuJoCo 仿真环境封装类。"""
@@ -31,7 +33,7 @@ class RM65Env:
             model_path: MuJoCo XML 模型文件路径。
             dt: 可选的覆盖时间步长。
         """
-        self.model = mujoco.MjModel.from_xml_path(str(model_path))
+        self.model = load_mujoco_model(model_path)
         if dt is not None:
             self.model.opt.timestep = dt
         self.data = mujoco.MjData(self.model)

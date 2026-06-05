@@ -31,7 +31,8 @@ experiment_data/
 ├── exp3_tcp_joint_dual/
 ├── exp4_tube_robustness/
 ├── exp5_realtime_performance/
-└── exp6_ablation/
+├── exp6_ablation/
+└── exp7_noise_tube_ablation/
 ```
 
 ### CSV 格式标准
@@ -511,6 +512,150 @@ seeds: 0..19
 |------|------|
 | ablation_var | str，消融变量名（tube/window/ratio/backswing/r_decay） |
 | ablation_value | str，变量取值 |
+
+---
+
+## 实验 7：噪声环境下 Tube 效果验证
+
+### 目的
+验证传感器观测噪声（模拟 RealSense D435 深度相机跟踪误差）对 MPC 命中率的影响，
+并测试 Tube 空间走廊结构能否补偿噪声造成的性能下降。
+
+核心假设：
+- 观测噪声 → `find_hitting_point_physics` 预测错误击球点 → iLQR 规划偏错方向 → 命中率下降
+- Tube 空间走廊（不要求精确到达单点，允许沿轨迹线扫过）可容忍"规划错了"的偏差 → 恢复命中率
+
+### 脚本
+`scripts/rm65_mpc_tube_constraint.py`
+
+### 噪声注入方式：monkey-patch RM65Env.get_ball_state
+
+采用方法 C：**wrapper pre-import 阶段替换类方法**。
+安全性验证通过：`predict_ball_trajectory` 和所有 save/restore 操作不走 `get_ball_state()`（走 `self.data` 直访），不会被噪声污染。
+
+```python
+"""exp7 噪声注入包装脚本。"""
+import sys
+import numpy as np
+
+# 1. 在 import 主模块前，替换 RM65Env.get_ball_state
+from src.sim.rm65_env import RM65Env
+from src.utils.noise import add_observation_noise
+
+_orig_get_ball_state = RM65Env.get_ball_state
+
+def _noisy_get_ball_state(self):
+    pos, vel = _orig_get_ball_state(self)
+    if hasattr(self, '_noise_rng'):
+        pos, vel = add_observation_noise(
+            pos, vel, self._noise_rng,
+            pos_std=self._noise_pos_std, vel_std=self._noise_vel_std,
+        )
+    return pos, vel
+
+RM65Env.get_ball_state = _noisy_get_ball_state
+
+# 2. 再 import 主模块
+sys.argv = ["rm65_mpc_tube_constraint.py", "--serve-box",
+    "--ball-speed", sys.argv[1], "--seed", sys.argv[2],
+    "--use-tube", sys.argv[3], "--no-backswing", "--no-plot",
+]
+import scripts.rm65_mpc_tube_constraint as main_mod
+
+# 3. 在 env 实例创建后注入噪声参数
+_patched_env = False
+_orig_main = main_mod.main
+def _patched_main():
+    global _patched_env
+    # 在 main() 内首次使用 env 前注入
+    import src.utils.noise  # 确保模块可用
+    main_mod.env._noise_rng = np.random.default_rng(int(sys.argv[2]))
+    main_mod.env._noise_pos_std = 0.03
+    main_mod.env._noise_vel_std = 0.3
+    if sys.argv[4] == "off":
+        main_mod.env._noise_pos_std = 0.0
+        main_mod.env._noise_vel_std = 0.0
+    return _orig_main()
+main_mod.main = _patched_main
+
+main_mod.main()
+```
+
+### 参数矩阵
+
+```yaml
+# exp7_noise_tube_ablation/config.yaml
+experiment: exp7_noise_tube_ablation
+description: "噪声×Tube 2×2 交互：验证观测噪声下 Tube 的补偿作用"
+seeds: [0, 1, 2, 3, 4]
+n_seeds: 5
+
+# 变量1: 噪声开关
+noise_conditions:
+  - pos_std: 0.0, vel_std: 0.0                  # baseline（无噪声）
+  - pos_std: 0.03, vel_std: 0.3                   # 仿真噪声（模拟 D435 深度相机在 2-4m 处的跟踪误差）
+
+# 变量2: Tube 开关
+tube_conditions:
+  - use_tube: true
+  - use_tube: false
+
+# 变量3: 球速
+ball_speeds: [8, 10, 12, 14, 16]
+
+# 固定参数
+fixed_params:
+  serve_box: true
+  no_backswing: true
+  no_plot: true
+  fd: false
+  horizon: 120
+  iter: 10
+  replan_interval: 10
+  window_ms: 50.0
+  tube_cost_ratio: 0.3
+
+# 速度豁免（与 exp1 一致，测试算法能力上限而非关节约束）
+speed_exemption:
+  forward_pass_margin: 3.0
+  qdot_scale: 0.95
+
+# 总运行数 = 2 noise × 2 tube × 5 speeds × 5 seeds = 100 runs
+```
+
+### 运行命令模板
+
+```bash
+# 无噪声 + 有Tube
+python scripts/exp/_run_exp7_noise.py 12 0 true off
+
+# 有噪声 + 有Tube
+python scripts/exp/_run_exp7_noise.py 12 0 true on
+
+# 有噪声 + 无Tube
+python scripts/exp/_run_exp7_noise.py 12 0 false on
+```
+
+### 额外 CSV 列
+| 列名 | 说明 |
+|------|------|
+| noise_on | bool，是否注入观测噪声 |
+| use_tube | bool，是否启用 Tube |
+| noise_pos_std | float，位置噪声标准差 (m) |
+| noise_vel_std | float，速度噪声标准差 (m/s) |
+
+### 对照分析
+
+| 对比 | 回答的问题 |
+|------|-----------|
+| noise_off × tube_off vs noise_on × tube_off | 噪声对命中率的绝对影响 |
+| noise_on × tube_off vs noise_on × tube_on | **Tube 能否补偿噪声**（核心结论） |
+| noise_off × tube_off vs noise_off × tube_on | Tube 在无噪声时是否有效（已有结论：无效果） |
+
+### 预期结论
+- 噪声显著降低命中率
+- **Tube ON 在噪声条件下显著提升命中率**（证明 Tube 价值恰好体现在对抗观测噪声上）
+- 无噪声时 Tube ON/OFF 无差异（复现已有的消融结论）
 
 ---
 

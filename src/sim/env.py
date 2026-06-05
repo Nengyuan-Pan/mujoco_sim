@@ -4,6 +4,8 @@ import numpy as np
 import mujoco
 from pathlib import Path
 
+from src.utils.mujoco_loader import load_mujoco_model
+
 
 class MujocoEnv:
     """MuJoCo 仿真环境封装类，管理模型加载、状态读写、仿真步进。"""
@@ -26,7 +28,7 @@ class MujocoEnv:
             model_path: MuJoCo XML 模型文件路径。
             dt: 可选的覆盖时间步长，若提供则覆盖模型中的设定。
         """
-        self.model = mujoco.MjModel.from_xml_path(str(model_path))
+        self.model = load_mujoco_model(model_path)
         if dt is not None:
             self.model.opt.timestep = dt
         self.data = mujoco.MjData(self.model)
