@@ -20,7 +20,7 @@ import numpy as np
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-SCRIPT = ROOT / "scripts" / "run_tcp_limit_experiment_v3.py"
+SCRIPT = ROOT / "scripts" / "exp" / "run_tcp_limit_experiment_v3.py"
 DATE = "20260602"
 OUT_DIR = ROOT / "results" / f"exp_ablation_corridor_{DATE}"
 OUT_DIR.mkdir(parents=True, exist_ok=True)

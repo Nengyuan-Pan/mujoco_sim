@@ -14,7 +14,7 @@ import re
 import numpy as np
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPT = ROOT / "scripts" / "rm65_mpc_v7.py"
 
 BALL_SPEED = 7.0

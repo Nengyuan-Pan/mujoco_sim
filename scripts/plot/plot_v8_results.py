@@ -246,7 +246,7 @@ def plot_combined_table(results, save_path):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python plot_v8_results.py <results_dir>")
+        print("Usage: python scripts/plot/plot_v8_results.py <results_dir>")
         return
 
     results_dir = Path(sys.argv[1])

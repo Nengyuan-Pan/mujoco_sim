@@ -10,7 +10,7 @@ from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-SCRIPT = ROOT / "scripts" / "run_tcp_limit_experiment_v3.py"
+SCRIPT = ROOT / "scripts" / "exp" / "run_tcp_limit_experiment_v3.py"
 HIT_THRESHOLD = 0.12
 
 

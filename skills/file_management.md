@@ -56,10 +56,61 @@
 - [ ] 有中文注释说明各参数含义
 
 ### 创建脚本文件
-- [ ] 放在 `scripts/` 目录
+- [ ] 放在正确的 `scripts/` 子目录（见下方分类规则）
 - [ ] 使用 `argparse` 解析命令行参数
 - [ ] 支持 `--config` 指定配置文件路径
 - [ ] 日志输出到 `results/` 目录
+- [ ] 路径使用 `Path(__file__).resolve().parent...` 相对定位，层数与目录深度匹配
+- [ ] 创建/移动后更新 `scripts/README.md` 和 `AGENTS.md`
+
+## scripts/ 目录分类规则
+
+### 根目录（被引用的核心仿真脚本）
+
+**原则：被其他脚本通过 Python `import` 或 `subprocess` 调用的脚本留在根目录，不可移动。**
+
+| 脚本 | 引用方式 |
+|------|---------|
+| `rm65_mpc_tube_constraint.py` | exp/ 包装脚本 Python import |
+| `rm65_mpc_tube_constraint_realtime.py` | TCP 限速实验 import |
+| `rm65_mpc_tube_constraint_realtime_v2.py` | 多个 exp/ 脚本 subprocess |
+| `rm65_mpc_tube.py` | scan_ball_params import |
+| `rm65_mpc_ilqr_5_5.py` | realtime_batch import |
+| `rm65_evaluate.py` | realtime_batch import |
+| `rm65_mpc_v6.py` | 10+ 个 run_exp_* 脚本 subprocess |
+| `rm65_mpc_v7.py` | 4+ 个 run_exp_* 脚本 subprocess |
+| `rm65_mpc_v8.py` | run_20hits_video.py Python import + run_v8_exp.py subprocess |
+| `rm65_mpc_v9.py` | 最新迭代，与 v6/v7/v8 同类 |
+
+### 子目录分类
+
+| 目录 | 用途 | 判定条件 |
+|------|------|---------|
+| `sim/` | 独立仿真脚本（变体、benchmark、训练） | 可独立运行的仿真，不被其他脚本引用 |
+| `exp/` | 实验运行器（包装·批量·扫参） | 通过 subprocess 调用根目录仿真脚本 |
+| `extract/` | 结果提取（日志 → CSV） | 解析实验日志输出结构化数据 |
+| `plot/` | 论文图表生成 | 读取数据文件生成 matplotlib 图表 |
+| `tools/` | 独立工具（查看器·扫描·诊断） | 一次性分析/可视化工具 |
+| `test/` | 快速验证脚本 | 通过 subprocess 调用仿真做快速测试 |
+
+### 新建脚本的分类决策树
+
+1. **被其他脚本引用？** → 留根目录
+2. **是仿真主脚本（MPC/iLQR/控制循环）？** → `sim/`
+3. **批量运行多个条件并收集结果？** → `exp/`
+4. **解析日志输出 CSV/统计？** → `extract/`
+5. **读取数据生成图表？** → `plot/`
+6. **查看器/扫描器/一次性诊断？** → `tools/`
+7. **快速验证某功能是否正常？** → `test/`
+
+## 脚本移动检查清单
+
+- [ ] 确认目标文件未被其他脚本引用（`grep` 搜索文件名）
+- [ ] 移动到正确子目录
+- [ ] 修复 `Path(__file__).resolve().parent` 层数（根=2层, 子目录=3层）
+- [ ] 修复 docstring/usage 中的路径示例（`scripts/xxx` → `scripts/sub/xxx`）
+- [ ] 更新 `scripts/README.md` 详细清单
+- [ ] 更新 `AGENTS.md` 目录结构树和核心脚本参考表
 
 ## 目录结构映射
 

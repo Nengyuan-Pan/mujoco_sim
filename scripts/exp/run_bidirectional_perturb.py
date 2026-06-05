@@ -28,7 +28,7 @@ def run_one(
     use_tube: str,
     perturb_alpha_min: float = 0.0,
     hit_threshold: float = 0.12,
-    script: str = "run_tcp_limit_experiment.py",
+    script: str = "exp/run_tcp_limit_experiment.py",
     ablation: str | None = None,
 ) -> dict:
     cmd = [
@@ -79,7 +79,7 @@ def run_batch(
     perturb_alpha_min: float,
     label: str,
     hit_threshold: float = 0.12,
-    script: str = "run_tcp_limit_experiment.py",
+    script: str = "exp/run_tcp_limit_experiment.py",
     ablation: str | None = None,
 ) -> dict:
     results = {"time": {}, "space": {}}
@@ -193,7 +193,7 @@ def main() -> None:
     parser.add_argument("--perturb-alpha-min", type=float, default=0.3)
     parser.add_argument("--hit-threshold", type=float, default=0.12,
                         help="命中判定阈值 (m), 默认 0.12m=12cm")
-    parser.add_argument("--script", type=str, default="run_tcp_limit_experiment.py",
+    parser.add_argument("--script", type=str, default="exp/run_tcp_limit_experiment.py",
                         help="实验入口脚本 (v1 or v2)")
     parser.add_argument("--ablation", type=str, default=None,
                         help="消融模式: 'sigma-only'(禁用softmin)")

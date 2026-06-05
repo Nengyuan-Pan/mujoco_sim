@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 DATE = "20260603"
-DATA_DIR = Path(__file__).resolve().parent.parent / "results" / f"exp_speed_v6_{DATE}"
+DATA_DIR = Path(__file__).resolve().parent.parent.parent / "results" / f"exp_speed_v6_{DATE}"
 OUT_DIR = DATA_DIR
 
 plt.rcParams.update({

@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 OUT_DIR = ROOT / "results" / "exp_qv_sweep_20260603"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 

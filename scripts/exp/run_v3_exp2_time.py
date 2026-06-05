@@ -19,7 +19,7 @@ import numpy as np
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-SCRIPT = ROOT / "scripts" / "run_tcp_limit_experiment_v3.py"
+SCRIPT = ROOT / "scripts" / "exp" / "run_tcp_limit_experiment_v3.py"
 
 BALL_SPEED = 7.0
 N_SEEDS = 20

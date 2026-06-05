@@ -142,11 +142,15 @@ mujoco_sim/
 │   ├── rm65_mpc_tube_constraint_realtime_v2.py   # 实时 v2（根）
 │   ├── rm65_mpc_tube.py / rm65_mpc_ilqr_5_5.py  # Tube/iLQR 基线（根）
 │   ├── rm65_evaluate.py                          # 评估脚本（根）
-│   ├── sim/            # 独立仿真 13 个（v4/v5/fast/ilqt/train）
-│   ├── exp/            # 实验设施 25 个（包装·批量·运行器·提取）
-│   ├── extract/        # 结果提取 4 个（日志→CSV）
-│   ├── plot/           # 论文图表 6 个
-│   ├── tools/          # 独立工具 7 个（查看器·扫描·可视化）
+│   ├── rm65_mpc_v6.py                            # V6 仿真主脚本（被 run_exp_* subprocess 调用）
+│   ├── rm65_mpc_v7.py                            # V7 仿真主脚本（被 run_exp_* subprocess 调用）
+│   ├── rm65_mpc_v8.py                            # V8 仿真主脚本（被 import + subprocess 调用）
+│   ├── rm65_mpc_v9.py                            # V9 仿真主脚本（最新迭代）
+│   ├── sim/            # 独立仿真 17 个（v4/v5/v8v9变体/fast/ilqt/train）
+│   ├── exp/            # 实验设施 43 个（包装·批量·运行器）
+│   ├── extract/        # 结果提取 6 个（日志→CSV）
+│   ├── plot/           # 论文图表 12 个
+│   ├── tools/          # 独立工具 10 个（查看器·扫描·诊断·可视化）
 │   ├── test/           # 快速验证 9 个
 │   └── README.md       # 完整清单与说明
 ├── tests/
@@ -358,9 +362,13 @@ mujoco_sim/
 | 脚本 | 用途 | 关键特性 |
 |------|------|---------|
 | `scripts/rm65_mpc_tube_constraint.py` | 离线仿真主脚本 | MPC+iLQR+Tube+硬约束+X平面墙 |
-| `scripts/rm65_mpc_tube_constraint_realtime_v5.py` | ★ 当前活跃版本 | 主动击球+随挥+空间走廊Tube+多层安全滤波+异步重规划 |
+| `scripts/rm65_mpc_v9.py` | ★ 最新版本（V9） | V8 基础 + 更长随挥距离(0.20m) + 更多随挥步数(80步) |
+| `scripts/rm65_mpc_v8.py` | V8 仿真主脚本 | 解耦 Tube 走廊 + Softmin 终端，`--no-tube`/`--no-softmin` |
+| `scripts/rm65_mpc_v7.py` | V7 仿真主脚本 | V6 + 击球点终端 + TCP/关节硬约束 |
+| `scripts/rm65_mpc_v6.py` | V6 仿真主脚本 | 满秩 Q_v + 来球反方向 + softmin + PD 随挥 |
+| `scripts/rm65_mpc_tube_constraint_realtime_v5.py` | 实时 v5（sim/） | 主动击球+随挥+空间走廊Tube+多层安全滤波+异步重规划 |
 | `scripts/rm65_mpc_tube_constraint_realtime.py` | 实时仿真 v1 | 异步重规划+buffer机制 |
-| `scripts/run_tcp_limit_experiment.py` | TCP 限速实验 | monkey-patch 安全滤波器注入 TCP 检查 |
-| `scripts/rm65_mpc_ilqt.py` | 简化 MPC+iLQR | 无 Tube，基础两阶段 iLQR |
-| `scripts/train_ilqt.py` | 离线训练入口 | 单次 iLQR 优化 + 保存轨迹 |
-| `scripts/rm65_joint_viewer.py` | 关节调节查看器 | position 执行器，拖动滑条控制关节角 |
+| `scripts/exp/run_tcp_limit_experiment_v3.py` | TCP 限速实验 | monkey-patch 安全滤波器注入 TCP 检查 |
+| `scripts/sim/rm65_mpc_ilqt.py` | 简化 MPC+iLQR | 无 Tube，基础两阶段 iLQR |
+| `scripts/sim/train_ilqt.py` | 离线训练入口 | 单次 iLQR 优化 + 保存轨迹 |
+| `scripts/tools/rm65_joint_viewer.py` | 关节调节查看器 | position 执行器，拖动滑条控制关节角 |

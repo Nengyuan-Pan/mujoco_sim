@@ -2,37 +2,41 @@
 
 ## 组织原则
 
-- **根目录保留 6 个被其他脚本 import 的核心仿真脚本**
+- **根目录保留 10 个被其他脚本 import 或 subprocess 调用的核心仿真脚本**
 - **其余按功能分类入 6 个子目录**
 
 ## 目录说明
 
 | 目录 | 数量 | 内容 | 运行方式 |
 |------|------|------|---------|
-| `scripts/` (根) | 6 | 核心仿真脚本（被 cross-import） | `python scripts/xxx.py --args` |
-| `sim/` | 13 | 独立仿真脚本（MPC/iLQR/Training） | `python scripts/sim/xxx.py --args` |
-| `exp/` | 28 | 实验基础设施（包装·批量·运行器） | `python scripts/exp/xxx.py --args` |
-| `extract/` | 5 | 结果提取：日志 → CSV | `python scripts/extract/xxx.py` |
-| `plot/` | 6 | 论文图表生成 | `python scripts/plot/xxx.py` |
-| `tools/` | 7 | 独立工具（查看器·扫描·可视化） | `python scripts/tools/xxx.py` |
+| `scripts/` (根) | 10 | 核心仿真脚本（被 cross-import / subprocess 调用） | `python scripts/xxx.py --args` |
+| `sim/` | 17 | 独立仿真脚本（MPC/iLQR/Training/变体） | `python scripts/sim/xxx.py --args` |
+| `exp/` | 43 | 实验基础设施（包装·批量·运行器） | `python scripts/exp/xxx.py --args` |
+| `extract/` | 6 | 结果提取：日志 → CSV | `python scripts/extract/xxx.py` |
+| `plot/` | 12 | 论文图表生成 | `python scripts/plot/xxx.py` |
+| `tools/` | 10 | 独立工具（查看器·扫描·诊断·可视化） | `python scripts/tools/xxx.py` |
 | `test/` | 9 | 快速验证脚本 | `python scripts/test/xxx.py` |
 
 ## 详细清单
 
-### 根目录（6 个）
+### 根目录（10 个）
 
-被 `exp/` 下包装脚本通过 `import scripts.xxx as main_mod` 引用，不可移动：
+被 `exp/` 下脚本通过 Python `import` 或 `subprocess` 引用，不可移动：
 
-| 文件 | 用途 |
-|------|------|
-| `rm65_mpc_tube_constraint.py` | 离线 MPC+iLQR+Tube+硬约束（被 exp1 豁免包装引用） |
-| `rm65_mpc_tube_constraint_realtime.py` | 实时 v1（被 TCP 限速实验引用） |
-| `rm65_mpc_tube_constraint_realtime_v2.py` | 实时 v2（被 V3 实验引用） |
-| `rm65_mpc_tube.py` | 原始 Tube-based 击打（被 scan_ball_params 引用） |
-| `rm65_mpc_ilqr_5_5.py` | MPC+iLQR 带后摆（被 realtime_batch 引用） |
-| `rm65_evaluate.py` | 评估脚本（被 realtime_batch 引用） |
+| 文件 | 用途 | 引用方式 |
+|------|------|---------|
+| `rm65_mpc_tube_constraint.py` | 离线 MPC+iLQR+Tube+硬约束 | exp1 豁免包装 import |
+| `rm65_mpc_tube_constraint_realtime.py` | 实时 v1 | TCP 限速实验 import |
+| `rm65_mpc_tube_constraint_realtime_v2.py` | 实时 v2 | V3 实验、paper 实验 subprocess |
+| `rm65_mpc_tube.py` | 原始 Tube-based 击打 | scan_ball_params import |
+| `rm65_mpc_ilqr_5_5.py` | MPC+iLQR 带后摆 | realtime_batch import |
+| `rm65_evaluate.py` | 评估脚本 | realtime_batch import |
+| `rm65_mpc_v6.py` | V6：满秩 Q_v + 来球反方向 + softmin + PD 随挥 | 10 个 run_exp 脚本 subprocess |
+| `rm65_mpc_v7.py` | V7：V6 + 击球点终端 + TCP/关节硬约束 | 4 个 run_exp 脚本 subprocess |
+| `rm65_mpc_v8.py` | V8：解耦 Tube 走廊 + Softmin 终端，支持 `--no-tube`/`--no-softmin` | run_20hits_video import + run_v8_exp subprocess |
+| `rm65_mpc_v9.py` | V9：V8 + 更长随挥距离(0.20m) + 更多随挥步数(80步) | 最新迭代 |
 
-### sim/ — 独立仿真脚本（13 个）
+### sim/ — 独立仿真脚本（17 个）
 
 | 文件 | 用途 |
 |------|------|
@@ -49,16 +53,21 @@
 | `rm65_realtime_play.py` | 实时连续击球 |
 | `train_mpc.py` | MPC Rolling Planner 训练 |
 | `train_ilqt.py` | 单次 iLQR 优化 + 可视化 |
+| `rm65_mpc_v8_softmin_only.py` | V8 变体：仅 softmin（默认 flags 不同） |
+| `rm65_mpc_v8_tuned.py` | V8 变体：调参版 |
+| `rm65_mpc_v8_tuned_softmin_only.py` | V8 变体：调参 + 仅 softmin |
+| `rm65_mpc_v9_softmin_only.py` | V9 变体：仅 softmin |
 
-### exp/ — 实验基础设施（25 个）
+### exp/ — 实验基础设施（43 个）
 
-#### 包装脚本（4 个）
+#### 包装脚本（5 个）
 | 文件 | 用途 |
 |------|------|
 | `_run_exp1_exempt.py` | 速度豁免 monkey-patch（bounce 模式） |
 | `_run_exp1_v3_exempt.py` | 速度豁免 + no-bounce |
 | `_run_strict_experiment.py` | 严格约束 monkey-patch |
 | `_run_exp2_v3_strict.py` | 严格约束包装（exp2_v3，离线） |
+| `_run_exp7_noise.py` | 噪声实验包装 |
 
 #### TCP 限速实验（3 个）
 | 文件 | 用途 |
@@ -74,9 +83,9 @@
 | `run_exp1_v3_batch.py` | Exp1 V3 并行扫参（540 runs, 4 workers） |
 | `run_exp2_v2_batch.py` | Exp2 低球速扫参（7-8 m/s） |
 | `run_exp2_v3_batch.py` | Exp2 V3 严格约束并行扫参（8-18 m/s, 4 workers） |
-| `run_v3_experiments.py` | V3 实验批量 |
+| `run_exp7_batch.py` | Exp7 噪声实验批量 |
 
-#### 实验专用运行器（12 个）
+#### 早期实验运行器（12 个）
 | 文件 | 用途 |
 |------|------|
 | `run_experiments.py` | 实验 A（豁免）+ B（严格）对比 |
@@ -87,6 +96,26 @@
 | `run_exp_ablation_A.py` | 消融：corridor vs softmin |
 | `run_expA_random.py` / `run_expB_alpha_sweep.py` | 随机扰动 / alpha 衰减扫参 |
 | `run_v3_exp1_rerun.py` / `run_v3_exp2_time.py` / `run_v3_exp2_coupled.py` | V3 专项重跑 |
+| `run_v3_experiments.py` | V3 实验批量 |
+
+#### V6+ 实验运行器（15 个）
+| 文件 | 用途 |
+|------|------|
+| `run_exp_ablation_v6.py` | V6 消融：Softmin × 随挥 4 条件 |
+| `run_exp_corridor_ablation.py` | 走廊代价消融：v6 vs v7 |
+| `run_exp_direction_shift.py` | 方向 × 偏移 2×2 消融 |
+| `run_exp_fast_near.py` | fast_lin + near_iters 调参 |
+| `run_exp_near_iters.py` | Near_iters 调参实验 |
+| `run_exp_offset_sweep.py` | 偏移量扫描：1-5 cm |
+| `run_exp_paper.py` | 论文实验：v2/v6/v7 对比 |
+| `run_exp_progressive_v2.py` | V2 特性逐步移植消融 |
+| `run_exp_qv_sweep.py` | V7 Q_v/Q_p 调参 |
+| `run_exp_speed_v6.py` | V6 球速实验：5-11 m/s |
+| `run_exp_target_speed.py` | 终端速度消融：1.8/3.0/5.0 m/s |
+| `run_exp_v5_robustness.py` | V2+V5 鲁棒性测试 |
+| `run_exp_v5v6_compare.py` | V5 vs V6 公平对比 |
+| `run_exp_v6_v2feat_perturb.py` | V6 + V2 全特性 + 扰动 |
+| `run_v8_exp.py` | V8 批量消融实验 |
 
 #### 其他（3 个）
 | 文件 | 用途 |
@@ -95,7 +124,7 @@
 | `run_20hits_video.py` | 20 次连续击球 + 视频 |
 | `sweep_margins.py` | 关节裕度扫参 |
 
-### extract/ — 结果提取（5 个）
+### extract/ — 结果提取（6 个）
 
 | 文件 | 数据源 |
 |------|--------|
@@ -104,8 +133,9 @@
 | `extract_exp2_results.py` | exp2_strict_joint（实时，含 UTF-16LE 处理） |
 | `extract_exp2_v2_results.py` | exp2_strict_joint_v2（离线格式） |
 | `extract_exp2_v3_results.py` | exp2_v3_strict_joint（离线格式） |
+| `extract_exp7_results.py` | exp7_noise（噪声实验） |
 
-### plot/ — 图表生成（6 个）
+### plot/ — 图表生成（12 个）
 
 | 文件 | 图表 |
 |------|------|
@@ -115,8 +145,14 @@
 | `plot_exp_random.py` | 随机扰动对比 |
 | `plot_exp_ablation_A.py` | 消融对比 |
 | `plot_perturb_results.py` | 扰动结果（含 subprocess 重跑） |
+| `plot_ablation_v6.py` | V6 消融 4 条件对比图 |
+| `plot_exp_ablation_v6.py` | V6 消融柱状图 |
+| `plot_exp_speed_v6.py` | V6 球速实验图表 |
+| `plot_qv_sweep.py` | Q_v/Q_p 调参图表（V6） |
+| `plot_v7_qv_sweep.py` | Q_v/Q_p 调参图表（V7） |
+| `plot_v8_results.py` | V8 消融汇总图 |
 
-### tools/ — 独立工具（7 个）
+### tools/ — 独立工具（10 个）
 
 | 文件 | 用途 |
 |------|------|
@@ -127,6 +163,9 @@
 | `scan_ball_params.py` | 球参数网格扫描 |
 | `visualize_robot_parts.py` | 机器人部位可视化 |
 | `render_20hits_video.py` | 离屏渲染 MP4 视频 |
+| `compare_v3_v6_ablation.py` | V3 vs V6 消融逐 seed 对比分析 |
+| `compare_v3_v6_detail.py` | V3 vs V6 详细指标对比 |
+| `diagnose_v6_robustness.py` | V6 鲁棒性 per-seed 诊断 |
 
 ### test/ — 快速验证（9 个）
 

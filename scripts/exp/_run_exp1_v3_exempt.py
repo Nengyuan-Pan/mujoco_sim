@@ -1,7 +1,7 @@
 """实验1 v3 辅助包装脚本：速度豁免 + no-bounce 球生成。
 
 用法:
-    python scripts/_run_exp1_v3_exempt.py <ball-speed> <seed> <use_tube>
+    python scripts/exp/_run_exp1_v3_exempt.py <ball-speed> <seed> <use_tube>
 """
 import sys
 from pathlib import Path

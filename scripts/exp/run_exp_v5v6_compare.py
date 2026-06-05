@@ -19,8 +19,8 @@ import json
 import numpy as np
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-V5_SCRIPT = ROOT / "scripts" / "run_tcp_limit_experiment_v3.py"
+ROOT = Path(__file__).resolve().parent.parent.parent
+V5_SCRIPT = ROOT / "scripts" / "exp" / "run_tcp_limit_experiment_v3.py"
 V6_SCRIPT = ROOT / "scripts" / "rm65_mpc_v6.py"
 DATE = "20260603"
 OUT_DIR = ROOT / "results" / f"exp_v5v6_compare_{DATE}"

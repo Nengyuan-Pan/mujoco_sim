@@ -15,9 +15,9 @@ import json
 import numpy as np
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-V2_SCRIPT = ROOT / "scripts" / "run_tcp_limit_experiment_v3.py"
-V5_SCRIPT = ROOT / "scripts" / "rm65_mpc_tube_constraint_realtime_v5.py"
+ROOT = Path(__file__).resolve().parent.parent.parent
+V2_SCRIPT = ROOT / "scripts" / "exp" / "run_tcp_limit_experiment_v3.py"
+V5_SCRIPT = ROOT / "scripts" / "sim" / "rm65_mpc_tube_constraint_realtime_v5.py"
 DATE = "20260603"
 OUT_DIR = ROOT / "results" / f"exp_v5_robustness_{DATE}"
 OUT_DIR.mkdir(parents=True, exist_ok=True)

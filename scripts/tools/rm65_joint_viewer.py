@@ -12,7 +12,7 @@
   - 红=X轴，绿=Y轴，蓝=Z轴
 
 用法：
-  python scripts/rm65_joint_viewer.py
+  python scripts/tools/rm65_joint_viewer.py
 """
 
 import sys

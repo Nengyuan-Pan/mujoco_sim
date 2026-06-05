@@ -10,9 +10,9 @@
 输出: results/exp_paper_20260604/<condition>_<perturb>.csv
 
 用法:
-  python scripts/run_exp_paper.py
-  python scripts/run_exp_paper.py --seeds 10
-  python scripts/run_exp_paper.py --conditions v2 v6
+  python scripts/exp/run_exp_paper.py
+  python scripts/exp/run_exp_paper.py --seeds 10
+  python scripts/exp/run_exp_paper.py --conditions v2 v6
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 RESULTS_DIR = ROOT / "results" / "exp_paper_20260604"
 
 

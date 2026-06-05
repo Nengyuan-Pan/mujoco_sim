@@ -6,8 +6,8 @@ import csv
 import re
 from pathlib import Path
 
-SCRIPT = Path(__file__).parent / "rm65_mpc_v8.py"
-RESULTS_DIR = Path(__file__).resolve().parent.parent / "results" / "exp_v8"
+SCRIPT = Path(__file__).resolve().parent.parent / "rm65_mpc_v8.py"
+RESULTS_DIR = Path(__file__).resolve().parent.parent.parent / "results" / "exp_v8"
 SEEDS = list(range(50))
 
 BASE_ARGS = [

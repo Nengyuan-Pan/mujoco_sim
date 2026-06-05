@@ -29,7 +29,7 @@ from typing import Optional
 import numpy as np
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from src.sim.rm65_env import RM65Env
 from src.tennis.ball import (
@@ -1750,7 +1750,7 @@ def main() -> None:
     perturb_alpha_min = args.perturb_alpha_min
 
     # 加载配置
-    base_path = Path(__file__).resolve().parent.parent / "configs"
+    base_path = Path(__file__).resolve().parent.parent.parent / "configs"
     config_dict = load_config(base_path / "default.yaml")
     # v6: 叠加 v5 主动击打配置
     v5_config_path = base_path / "v5_active_hit.yaml"
@@ -1833,7 +1833,7 @@ def main() -> None:
     )
 
     # 初始化 RM-65 环境
-    model_path = Path(__file__).resolve().parent.parent / "src" / "robot" / "rm65_model.xml"
+    model_path = Path(__file__).resolve().parent.parent.parent / "src" / "robot" / "rm65_model.xml"
     env = RM65Env(model_path, dt=dt)
     env.init_q_left = init_q_left
 
@@ -3616,7 +3616,7 @@ def main() -> None:
 
     # ===== 可视化 =====
     if not args.no_plot:
-        results_dir = Path(__file__).resolve().parent.parent / "results"
+        results_dir = Path(__file__).resolve().parent.parent.parent / "results"
         tag = f"tube_{args.seed or 'default'}"
         ball_arr = np.array(ball_pos_history)
         racket_arr = np.array([X_history[i][:3] if i < len(X_history) else np.zeros(3)

@@ -16,7 +16,7 @@ import json
 import numpy as np
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPT = ROOT / "scripts" / "rm65_mpc_v6.py"
 DATE = "20260604"
 OUT_DIR = ROOT / "results" / f"exp_ablation_v6_{DATE}"

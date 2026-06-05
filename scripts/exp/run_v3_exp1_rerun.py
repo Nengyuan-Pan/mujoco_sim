@@ -6,7 +6,7 @@ import numpy as np
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-SCRIPT = ROOT / "scripts" / "run_tcp_limit_experiment_v3.py"
+SCRIPT = ROOT / "scripts" / "exp" / "run_tcp_limit_experiment_v3.py"
 
 def run_one(args_list):
     cmd = [sys.executable, str(SCRIPT)] + args_list

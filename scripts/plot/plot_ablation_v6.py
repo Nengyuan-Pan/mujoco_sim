@@ -10,7 +10,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = ROOT / "results" / "exp_ablation_v6_20260604"
 OUT_DIR = DATA_DIR
 

@@ -1,7 +1,7 @@
 """实验1辅助包装脚本：注入速度豁免参数。
 
 用法:
-    python scripts/_run_exp1_exempt.py <ball-speed> <seed> <use_tube>
+    python scripts/exp/_run_exp1_exempt.py <ball-speed> <seed> <use_tube>
 """
 import sys
 from pathlib import Path
