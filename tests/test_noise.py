@@ -172,7 +172,7 @@ class TestPerAxisPosNoise:
     """pos_std_xyz 各轴独立标准差。"""
 
     def test_per_axis_pos_std(self) -> None:
-        """pos_std_xyz=(0.01, 0.01, 0.05) 时 Z 轴 std≈0.05，X/Y≈0.01。"""
+        """pos_std_xyz=(0.01, 0.01, 0.05) 时第三个轴 std≈0.05，前两个≈0.01。"""
         rng = np.random.default_rng(42)
         ball_pos = np.array([0.0, 0.0, 1.2])
         ball_vel = np.zeros(3)
@@ -250,7 +250,7 @@ class TestPerAxisVelNoise:
     """vel_std_xyz 各轴独立标准差。"""
 
     def test_per_axis_vel_std(self) -> None:
-        """vel_std_xyz=(0.1, 0.1, 0.3) 时 Z 轴 std≈0.3。"""
+        """vel_std_xyz=(0.1, 0.1, 0.3) 时第三个轴 std≈0.3。"""
         rng = np.random.default_rng(42)
         ball_pos = np.zeros(3)
         ball_vel = np.zeros(3)

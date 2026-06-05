@@ -248,8 +248,8 @@ mujoco_sim/
   ```python
   # 标量模式（向后兼容）
   add_observation_noise(pos, vel, rng, pos_std=0.05, vel_std=0.3)
-  # per-axis 模式（Z 轴误差更大，模拟深度相机特性）
-  add_observation_noise(pos, vel, rng, pos_std_xyz=(0.02, 0.02, 0.05))
+  # per-axis 模式（Y 轴深度方向误差更大，模拟深度相机特性）
+  add_observation_noise(pos, vel, rng, pos_std_xyz=(0.02, 0.05, 0.02))
   ```
 - **噪声特性**：零均值高斯、独立同分布、seed 可复现、不修改输入数组
 - **未建模的二阶效应**（经评估暂不修复）：位置/速度相关性、距离相关 std、速度裁剪

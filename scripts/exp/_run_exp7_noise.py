@@ -40,8 +40,8 @@ if noise_mode != "off":
         _NOISE_POS_STD = 0.10
         _NOISE_VEL_STD = 1.0
     elif noise_mode == "anis":
-        _NOISE_POS_XYZ = (0.03, 0.03, 0.10)
-        _NOISE_VEL_XYZ = (0.3, 0.3, 1.0)
+        _NOISE_POS_XYZ = (0.03, 0.10, 0.03)
+        _NOISE_VEL_XYZ = (0.3, 1.0, 0.3)
 
 # ============================================================
 # Monkey-patch: 在 import 主模块前替换 RM65Env.get_ball_state
