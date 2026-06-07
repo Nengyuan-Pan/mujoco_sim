@@ -53,6 +53,11 @@ _orig_get_ball_state = RM65Env.get_ball_state
 
 
 def _noisy_get_ball_state(self) -> tuple[np.ndarray, np.ndarray]:
+    assert self._estimator is None, (
+        "噪声 monkey-patch 与 estimator 不兼容："
+        "噪声应作用于真值，而非滤波后的值。"
+        "请勿在噪声实验中启用 estimator_config。"
+    )
     pos, vel = _orig_get_ball_state(self)
     if _NOISE_RNG is not None:
         pos, vel = add_observation_noise(

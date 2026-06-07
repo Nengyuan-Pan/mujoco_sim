@@ -299,15 +299,35 @@ class RM65Env:
         return pos, vel
 
     def get_ball_pos(self) -> np.ndarray:
-        """获取球的当前世界坐标位置（如有 estimator 则返回滤波值）。"""
+        """获取球的当前世界坐标位置（如有 estimator 则返回滤波值）。
+
+        注意：若启用 estimator，本方法返回上次 update() 的缓存值，
+        不会驱动滤波器前进一步。主循环应使用 get_ball_state() 以确保
+        每帧滤波推进。
+        """
         if self._estimator is not None:
+            if not self._estimator.initialized:
+                raise RuntimeError(
+                    "estimator 未初始化，请先调用 get_ball_state() "
+                    "或 estimator.update()"
+                )
             return self._estimator.state[0]
         bq = self.BALL_QPOS_START
         return self.data.qpos[bq: bq + 3].copy()
 
     def get_ball_vel(self) -> np.ndarray:
-        """获取球的当前线速度（如有 estimator 则返回滤波值）。"""
+        """获取球的当前线速度（如有 estimator 则返回滤波值）。
+
+        注意：若启用 estimator，本方法返回上次 update() 的缓存值，
+        不会驱动滤波器前进一步。主循环应使用 get_ball_state() 以确保
+        每帧滤波推进。
+        """
         if self._estimator is not None:
+            if not self._estimator.initialized:
+                raise RuntimeError(
+                    "estimator 未初始化，请先调用 get_ball_state() "
+                    "或 estimator.update()"
+                )
             return self._estimator.state[1]
         bv = self.BALL_QVEL_START
         return self.data.qvel[bv: bv + 3].copy()

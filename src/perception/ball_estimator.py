@@ -63,6 +63,11 @@ class BallEstimator:
         self._x = np.zeros(self._n)
         self._P = np.eye(self._n) * 100.0
 
+    @property
+    def initialized(self) -> bool:
+        """滤波器是否已接收过至少一次观测。"""
+        return self._initialized
+
     def _build_R(
         self, pos_std: float, vel_std: float,
         pos_xyz: tuple | None, vel_xyz: tuple | None,
