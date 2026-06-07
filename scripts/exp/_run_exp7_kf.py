@@ -13,6 +13,7 @@ estimator_mode: kf | nokf
 """
 
 import sys
+import time as _time
 from pathlib import Path
 
 import numpy as np
@@ -109,6 +110,7 @@ def _patched_get_ball_state(self) -> tuple[np.ndarray, np.ndarray]:
                     pos_std_xyz=_NOISE_POS_XYZ,
                     vel_std_xyz=_NOISE_VEL_XYZ,
                 )
+            _estimator._last_update_time = _time.perf_counter() - _estimator._dt
             pos, vel = _estimator.update(pos, vel)
             _kf_consumed = True
         else:
