@@ -1,0 +1,90 @@
+experiment: exp8_estimator_recovery
+version: v1
+description: "BallEstimator KF 滤波恢复实验（exp7 扩展）"
+purpose: "建立噪声等级到 KF 恢复率的完整映射，验证 6D 卡尔曼滤波器能否恢复因观测噪声损失的 MPC 命中率"
+background: "exp7 证明即使最小噪声(lo: σ_p=2cm, σ_v=0.2m/s)也导致命中率从~80%暴跌到~1%；pipeline 测试证明 BallEstimator 平均衰减 80%位置噪声"
+comparison: "exp7 nokf 组作为基线（重新跑，不依赖旧数据），kf 组为实验组"
+
+ball_speeds: [6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+seeds: 50
+tube_modes: ["true", "false"]
+noise_modes: ["off", "lo", "mid", "hi", "anis"]
+estimator_modes: ["kf", "nokf"]
+total_runs: 10000
+
+noise_levels:
+  off:
+    pos_std: 0.0
+    vel_std: 0.0
+  lo:
+    pos_std: 0.02
+    vel_std: 0.2
+  mid:
+    pos_std: 0.05
+    vel_std: 0.5
+  hi:
+    pos_std: 0.10
+    vel_std: 1.0
+  anis:
+    pos_std_xyz: [0.03, 0.10, 0.03]
+    vel_std_xyz: [0.3, 1.0, 0.3]
+
+kf_r_mapping:
+  off:
+    pos_noise_std: 0.001
+    vel_noise_std: 0.01
+  lo:
+    pos_noise_std: 0.02
+    vel_noise_std: 0.2
+  mid:
+    pos_noise_std: 0.05
+    vel_noise_std: 0.5
+  hi:
+    pos_noise_std: 0.10
+    vel_noise_std: 1.0
+  anis:
+    pos_noise_xyz: [0.03, 0.10, 0.03]
+    vel_noise_xyz: [0.3, 1.0, 0.3]
+
+kf_defaults:
+  process_noise_pos: 0.001
+  process_noise_vel: 0.01
+  bounce_restitution: 0.75
+  g: 9.80665
+
+script_type: offline
+main_script: scripts/rm65_mpc_tube_constraint.py
+extra_flags: ["--no-backswing", "--no-plot"]
+workers: 4
+timeout_per_run: 180
+
+constraints:
+  forward_pass_margin: 3.0
+  qdot_scale: 0.95
+  forward_pass_q_tol_deg: 5.0
+  max_tcp_speed: inf
+
+kf_patches:
+  - "step: 重置 _kf_consumed flag"
+  - "get_ball_state: 真值→噪声→estimator.update→滤波输出（单步 flag）"
+  - "get_ball_pos: 返回 estimator.state 缓存"
+  - "get_ball_vel: 返回 estimator.state 缓存"
+  - "find_hitting_point_physics: 缓存回退（与 exp7 一致）"
+  - "RobotLimits.from_config: 速度豁免（与 exp7 一致）"
+
+metrics:
+  primary: hit_rate
+  secondary:
+    - pos_error
+    - min_distance
+    - max_qdot_ratio
+    - max_tcp_speed
+    - hit_type
+    - mpc_steps
+    - wall_time
+
+recovery_metrics:
+  absolute: "hit_rate(kf) - hit_rate(nokf)"
+  relative: "(hit_rate(kf) - hit_rate(nokf)) / (hit_rate(off) - hit_rate(nokf))"
+
+log_format: "speed{speed}_seed{seed}_tube_{tube}_noise_{noise}_{estimator}.log"
