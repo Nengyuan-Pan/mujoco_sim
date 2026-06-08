@@ -41,6 +41,12 @@ python scripts/sim/rm65_mpc_tube_constraint_realtime_v5.py --use_tube false --vi
 # 离线仿真（更快）
 python scripts/rm65_mpc_tube_constraint.py --serve-box --ball-speed 9 --no-plot
 
+# V11 最新版仿真
+python scripts/rm65_mpc_v11.py --serve-box --ball-speed 7 --viewer
+
+# V9 消融实验（Tube × Softmin × 随挥 2^3 因子设计）
+python scripts/run_v9_ablation.py --serve-box --ball-speed 7 --workers 4
+
 # 离线批量实验（多进程并行）
 python scripts/exp/run_exp1_v3_batch.py --workers 4
 
@@ -204,6 +210,10 @@ mujoco_sim/
 │   ├── rm65_mpc_tube.py                          # Tube 基线（根）
 │   ├── rm65_mpc_ilqr_5_5.py                     # MPC+iLQR 后摆基线（根）
 │   ├── rm65_evaluate.py                          # 评估脚本（根）
+│   ├── rm65_mpc_v11.py                           # ★ V11 最新（sigmoid 权重调度 + 远段轻量 iLQR）
+│   ├── rm65_mpc_v10.py                           # V10（去随挥 + 40cm 偏移，消融对比）
+│   ├── rm65_mpc_v9.py                            # V9（解耦 Tube/Softmin + ablation 模式）
+│   ├── run_20hits_video.py                       # 连续 20 次击打视频生成
 │   ├── sim/          # 独立仿真 13 个（v4/v5/fast/ilqt/train）
 │   ├── exp/          # 实验设施 25 个（包装·批量·运行器）
 │   ├── extract/      # 结果提取 4 个（日志→CSV）

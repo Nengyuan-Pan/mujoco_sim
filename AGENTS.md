@@ -148,8 +148,11 @@ mujoco_sim/
 │   ├── rm65_mpc_v6.py                            # V6 仿真主脚本（被 run_exp_* subprocess 调用）
 │   ├── rm65_mpc_v7.py                            # V7 仿真主脚本（被 run_exp_* subprocess 调用）
 │   ├── rm65_mpc_v8.py                            # V8 仿真主脚本（被 import + subprocess 调用）
-│   ├── rm65_mpc_v9.py                            # V9 仿真主脚本（最新迭代）
-│   ├── sim/            # 独立仿真 17 个（v4/v5/v8v9变体/fast/ilqt/train）
+│   ├── rm65_mpc_v9.py                            # V9 仿真主脚本（解耦 Tube/Softmin + ablation 模式）
+│   ├── rm65_mpc_v10.py                           # V10 仿真主脚本（V9 去随挥 + 40cm 终端偏移）
+│   ├── rm65_mpc_v11.py                           # ★ V11 仿真主脚本（最新迭代：bug修复 + sigmoid 权重调度）
+│   ├── run_20hits_video.py                       # 连续 20 次击打视频生成脚本
+│   ├── sim/            # 独立仿真（v4/v5/v8v9变体/fast/ilqt/train）
 │   ├── exp/            # 实验设施 43 个（包装·批量·运行器）
 │   ├── extract/        # 结果提取 6 个（日志→CSV）
 │   ├── plot/           # 论文图表 12 个
@@ -164,7 +167,7 @@ mujoco_sim/
 │   ├── test_noise.py
 │   ├── test_ball_estimator.py              # BallEstimator 单元+集成测试（16 tests）
 │   └── test_estimator_pipeline.py          # 感知 pipeline 端到端测试（7 tests）
-├── experiment_data/                  # 实验数据（按 exp1~exp7 组织）
+├── experiment_data/                  # 实验数据（按 exp1~exp8 组织）
 │   └── README.md                     # 数据存储规范
 ├── paper/                            # 论文 LaTeX 工程
 │   ├── main.tex
@@ -194,7 +197,7 @@ mujoco_sim/
 
 ### 实验数据目录
 - 所有实验数据存放在 `experiment_data/` 目录
-- 按 `exp1~exp7` 编号组织，每组含 `config.yaml` + `results.csv` + `raw/`
+- 按 `exp1~exp8` 编号组织，每组含 `config.yaml` + `results.csv` + `raw/`
 - 详见 `experiment_data/README.md`
 
 ## 核心算法说明
@@ -398,7 +401,9 @@ mujoco_sim/
 | 脚本 | 用途 | 关键特性 |
 |------|------|---------|
 | `scripts/rm65_mpc_tube_constraint.py` | 离线仿真主脚本 | MPC+iLQR+Tube+硬约束+X平面墙 |
-| `scripts/rm65_mpc_v9.py` | ★ 最新版本（V9） | V8 基础 + 更长随挥距离(0.20m) + 更多随挥步数(80步) |
+| `scripts/rm65_mpc_v11.py` | ★ 最新版本（V11） | V9 基础 + X平面墙修复 + sigmoid 权重调度 + 远段轻量 iLQR |
+| `scripts/rm65_mpc_v10.py` | V10 仿真主脚本 | V9 去随挥 + 40cm 终端偏移，用于消融对比 |
+| `scripts/rm65_mpc_v9.py` | V9 仿真主脚本 | 解耦 Tube 走廊 + Softmin 终端，`--ablation` 消融模式 |
 | `scripts/rm65_mpc_v8.py` | V8 仿真主脚本 | 解耦 Tube 走廊 + Softmin 终端，`--no-tube`/`--no-softmin` |
 | `scripts/rm65_mpc_v7.py` | V7 仿真主脚本 | V6 + 击球点终端 + TCP/关节硬约束 |
 | `scripts/rm65_mpc_v6.py` | V6 仿真主脚本 | 满秩 Q_v + 来球反方向 + softmin + PD 随挥 |

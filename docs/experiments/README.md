@@ -22,4 +22,6 @@
 | 2026-06-05 | [V8 连续20次击打](2026-06-05_exp_v8_20hits_continuous.md) | 7 | TCP≤1.8 | 100% | V8 连续20次全部主动命中，误差均值53mm |
 | 2026-06-05 | [V8 扰动消融](2026-06-05_exp_v8_perturb_ablation.md) | 7 | TCP≤1.8+扰动 | 4-100% | Tube+Softmin缺一不可；300ms/15cm扰动下default=92%，notube=4% |
 | 2026-06-05 | [V9 扰动对比](2026-06-05_exp_v9_perturb_robustness.md) | 7 | TCP≤1.8+扰动 | 0-94% | V9 default=94%略优于V8的92%；nosoftmin退化至6% |
+| 2026-06-06 | [V9 消融分析](../v9_ablation_analysis.md) | 7 | TCP≤1.8+扰动 | 45-100% | Tube+Softmin协同：无扰动100%，扰动57%；随挥无独立贡献 |
+| 2026-06-07 | [V9 消融（解耦）](../v9_ablation_analysis_decoupled.md) | 7 | TCP≤1.8+扰动 | 45-94% | Softmin 是主要贡献者（94%→86%），Tube 仅+2pp，随挥无效果 |
 | 2026-06-07 | [exp8 KF恢复](2026-06-07_exp8_estimator_recovery.md) | 6-15 | 豁免+噪声+KF | 0-81% | KF lo噪声恢复+12pp（17%）；off性能税-20pp；anis恢复意外好 |
