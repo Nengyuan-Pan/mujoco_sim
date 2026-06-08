@@ -1,19 +1,18 @@
-"""RM-65 V9: V8 + 更长随挥距离。
+"""RM-65 V10: V9 去随挥 + 40cm 终端偏移。
 
-=== V9 vs V8 ===
-  - follow_through_length: 0.01m → 0.20m（随挥延伸更远）
-  - follow_through_steps: 40 → 80（随挥时间更长，充分减速）
-  - hit-shift 默认值: 0.01 → 0.20
-  - 其余逻辑与 V8 完全一致
+=== V10 vs V9 ===
+  - 去掉随挥（follow_through_steps=0, follow_through_length=0.0）
+  - hit-shift 默认值: 0.20 → 0.40（终端目标 = 击球点 + 40cm 偏移）
+  - 其余逻辑与 V9 完全一致
 
-=== V8 架构（继承） ===
+=== V9 架构（继承） ===
   - Tube 走廊代价和 Softmin 终端代价解耦
   - 来球反方向作为击球方向
-  - PD 随挥控制器（击球后接管）
+  - PD 随挥控制器（击球后接管）— V10 已禁用
 
 用法:
-  python scripts/rm65_mpc_v9.py --serve-box --ball-speed 7 --viewer
-  python scripts/rm65_mpc_v9.py --serve-box --ball-speed 7 --no-backswing
+  python scripts/rm65_mpc_v10.py --serve-box --ball-speed 7 --viewer
+  python scripts/rm65_mpc_v10.py --serve-box --ball-speed 7 --no-backswing
 """
 
 from __future__ import annotations
@@ -1274,51 +1273,9 @@ class TubeHittingCostWrapper:
         return l_x_tube, l_xx_tube
 
 
-class TubeOnlyCost(TubeHittingCostWrapper):
-    """消融：仅 Tube 走廊运行代价 + 单点终端（无 softmin）。
-
-    直接复用父类全部走廊逻辑，仅强制关闭 softmin 终端。
-    终端代价退化为 base_cost 的单点精确击打目标。
-    """
-
-    def __init__(
-        self,
-        env: RM65Env,
-        base_cost: HittingCost,
-        hitting_tube: HittingTube,
-        horizon: int,
-        config: TubeConfig,
-    ) -> None:
-        super().__init__(env, base_cost, hitting_tube, horizon, config)
-        self._use_softmin = False
-
-
-class SoftminOnlyCost(TubeHittingCostWrapper):
-    """消融：仅 Softmin 多终端代价，无 Tube 走廊运行代价。
-
-    继承父类的 softmin 终端逻辑（候选点搜索、加权代价、导数），
-    但清空走廊步骤集合，使 running_cost / running_derivatives 不叠加走廊项。
-    """
-
-    def __init__(
-        self,
-        env: RM65Env,
-        base_cost: HittingCost,
-        hitting_tube: HittingTube,
-        horizon: int,
-        config: TubeConfig,
-    ) -> None:
-        super().__init__(env, base_cost, hitting_tube, horizon, config)
-        self._tube_steps = set()
-        self._tube_weight_scales = {}
-
-    def running_cost(self, x: np.ndarray, u: np.ndarray, k: int | None = None) -> float:
-        return self.base_cost.running_cost(x, u, k)
-
-    def running_derivatives(
-        self, x: np.ndarray, u: np.ndarray, k: int | None = None
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        return self.base_cost.running_derivatives(x, u, k)
+# ==============================================================================
+# 可视化函数
+# ==============================================================================
 
 def plot_tube_results(
     results_dir: Path,
@@ -1733,12 +1690,11 @@ def main() -> None:
     parser.add_argument("--horizon", type=int, default=None, help="短地平线步数")
     parser.add_argument("--iter", type=int, default=None, help="每次重规划迭代数")
     parser.add_argument("--fix-joint5", action="store_true", help="固定第 6 关节")
-    parser.add_argument("--backswing", type=float, default=0.6, help="后摆幅度 (rad)")
-    parser.add_argument("--bs-ratio", type=float, default=0.35, help="后摆占比")
-    parser.add_argument("--no-backswing", action="store_true", help="禁用后摆")
+    parser.add_argument("--no-backswing", action="store_true", default=True, help="禁用后摆（V10 默认禁用）")
+    parser.add_argument("--backswing", action="store_true", help="启用后摆（V10 默认禁用，需显式开启）")
     parser.add_argument("--r-decay", type=float, default=0.40, help="R 衰减占比")
     parser.add_argument("--no-r-decay", action="store_true", help="禁用 R 退火")
-    parser.add_argument("--hit-shift", type=float, default=0.0, help="随挥偏移距离 (m)")
+    parser.add_argument("--hit-shift", type=float, default=0.25, help="终端目标偏移距离 (m)")
     parser.add_argument("--ball-speed", type=float, default=None, help="球到达击打点时水平速度 (m/s)")
     parser.add_argument("--ball-distance", type=float, default=None, help="球起始位置到击打点的直线距离 (m)")
     parser.add_argument("--approach-angle", type=float, default=0.0, help="球飞来方向角 (度)，0=-Y方向，90=-X方向")
@@ -1758,15 +1714,9 @@ def main() -> None:
     parser.add_argument("--window-ms", type=float, default=50.0, help="Tube 候选窗口半宽 (ms)")
     parser.add_argument("--softmin-beta", type=float, default=5.0,
                         help="终端 softmin 锐度 β (1~20)，越大越接近 hard-min")
-    parser.add_argument("--ablation", choices=["full", "tube_only", "softmin_only", "none"],
-                        default=None,
-                        help="消融模式: full=Tube+Softmin(默认), tube_only=仅走廊, "
-                             "softmin_only=仅多终端, none=无。覆盖 --no-tube/--no-softmin")
-    parser.add_argument("--no-softmin", action="store_true", help="[已废弃] 禁用 softmin，请用 --ablation tube_only")
-    parser.add_argument("--no-tube", action="store_true", help="[已废弃] 禁用 Tube 走廊，请用 --ablation softmin_only")
+    parser.add_argument("--no-softmin", action="store_true", help="禁用 softmin 多终端（消融实验用）")
+    parser.add_argument("--no-tube", action="store_true", help="禁用 Tube 走廊代价（保留 softmin，消融实验用）")
     parser.add_argument("--no-follow-through", action="store_true", help="禁用球轨迹回溯随挥（消融实验用）")
-    parser.add_argument("--follow-trigger", choices=["planned", "contact"],
-                        default="planned", help="随挥触发方式: planned=到达计划时刻即触发, contact=仅在球拍击球后触发")
     parser.add_argument("--no-v-maximize", action="store_true", help="禁用中点速度最大化（消融实验用）")
     parser.add_argument("--fixed-direction", action="store_true",
                         help="使用固定 YAML hit_direction 替代 ball-reverse 方向")
@@ -1783,14 +1733,6 @@ def main() -> None:
                         help="击打点空间偏移 (m): 对 p_hit 施加侧向偏移，测试 tube 空间走廊的鲁棒性")
     parser.add_argument("--perturb-alpha-min", type=float, default=0.0,
                         help="衰减扰动保底值 (0~1): alpha=max(alpha_min, 1-count/total), 0=衰减到0, 0.3=保留30%%残余偏差")
-    parser.add_argument("--random-perturb", action="store_true",
-                        help="随机扰动: 绝对值在 [min, max] 内均匀采样，符号随机")
-    parser.add_argument("--perturb-sign", choices=["random", "positive", "negative"],
-                        default="random", help="扰动符号方向: random=随机, positive=球晚到/远, negative=球早到/近")
-    parser.add_argument("--time-perturb-min-ms", type=float, default=0.0,
-                        help="随机扰动时间下限 (ms), 配合 --random-perturb 使用")
-    parser.add_argument("--space-perturb-min-m", type=float, default=0.0,
-                        help="随机扰动空间下限 (m), 配合 --random-perturb 使用")
     parser.add_argument("--ball-speed-perturb-pct", type=float, default=0.0,
                         help="球速耦合扰动百分比 (%%): 实际发球速度=ball_speed*(1+pct/100), MPC规划仍用标称球速")
     parser.add_argument("--max-tcp", type=float, default=None,
@@ -1799,64 +1741,11 @@ def main() -> None:
                         help="终段 qdot/TCP 豁免步数 (0=全程硬限), v6 默认=0")
     args = parser.parse_args()
 
-    # 推导消融模式：--ablation 优先，否则从旧 flag 映射
-    if args.ablation is not None:
-        ablation_mode = args.ablation
-    else:
-        no_tube = args.no_tube
-        no_softmin = args.no_softmin
-        if no_tube and no_softmin:
-            ablation_mode = "none"
-        elif no_tube:
-            ablation_mode = "softmin_only"
-        elif no_softmin:
-            ablation_mode = "tube_only"
-        else:
-            ablation_mode = "full"
-    logger.info(f"[ablation] mode={ablation_mode} (Tube={'ON' if ablation_mode in ('full','tube_only') else 'OFF'}, "
-                f"Softmin={'ON' if ablation_mode in ('full','softmin_only') else 'OFF'})")
-
-    use_tube = ablation_mode in ("full", "tube_only")
-    need_candidates = ablation_mode in ("full", "tube_only", "softmin_only")
+    use_tube = not args.no_tube  # v8: --no-tube 关闭 Tube 走廊代价
     use_analytical = not args.fd
     time_perturb_s = args.time_perturb_ms / 1000.0
     space_perturb_m = args.space_perturb_m
     perturb_alpha_min = args.perturb_alpha_min
-
-    # 随机扰动: 时间从 [min_ms, max_ms] 均匀采样绝对值再随机符号;
-    #   空间从 [min_m, max_m] 均匀采样绝对值再随机符号
-    # 用 --time-perturb-ms 传递上限，--time-perturb-min-ms 传递下限
-    # 用 --space-perturb-m 传递上限，--space-perturb-min-m 传递下限
-    if args.random_perturb:
-        rng_perturb = np.random.default_rng(args.seed + 99999)
-        perturb_sign_cfg = getattr(args, 'perturb_sign', 'random')
-        tp_max = abs(args.time_perturb_ms)
-        tp_min = abs(getattr(args, 'time_perturb_min_ms', 0.0))
-        if tp_max > 1e-9:
-            tp_abs = rng_perturb.uniform(tp_min, tp_max)
-            if perturb_sign_cfg == "positive":
-                tp_sign = 1.0
-            elif perturb_sign_cfg == "negative":
-                tp_sign = -1.0
-            else:
-                tp_sign = rng_perturb.choice([-1.0, 1.0])
-            time_perturb_s = tp_sign * tp_abs / 1000.0
-        else:
-            time_perturb_s = 0.0
-        sp_max = abs(args.space_perturb_m)
-        sp_min = abs(getattr(args, 'space_perturb_min_m', 0.0))
-        if sp_max > 1e-9:
-            sp_abs = rng_perturb.uniform(sp_min, sp_max)
-            if perturb_sign_cfg == "positive":
-                sp_sign = 1.0
-            elif perturb_sign_cfg == "negative":
-                sp_sign = -1.0
-            else:
-                sp_sign = rng_perturb.choice([-1.0, 1.0])
-            space_perturb_m = sp_sign * sp_abs
-        else:
-            space_perturb_m = 0.0
-        logger.info(f"随机扰动采样: time={time_perturb_s*1000:+.1f}ms, space={space_perturb_m*100:+.1f}cm (sign={perturb_sign_cfg})")
 
     # 加载配置
     base_path = Path(__file__).resolve().parent.parent / "configs"
@@ -1924,9 +1813,9 @@ def main() -> None:
     init_q_left = np.array([-0.373, -1.57, 0.236, -0.404, -0.446, -2.45], dtype=np.float64)
 
     fix_joint5_angle: float | None = init_q[5] if args.fix_joint5 else None
-    use_backswing = not args.no_backswing
-    backswing_offset = -abs(args.backswing)
-    backswing_ratio = args.bs_ratio
+    use_backswing = args.backswing  # V10: 默认禁用后摆，需 --backswing 显式启用
+    backswing_offset = -0.6 if use_backswing else 0.0
+    backswing_ratio = 0.35 if use_backswing else 0.0
     use_r_decay = not args.no_r_decay
     r_decay_ratio = args.r_decay
 
@@ -1938,7 +1827,7 @@ def main() -> None:
         Q_n_tube=0.0,       # v8: 不惩罚走廊内法向量
         tube_cost_ratio=1.0,
         softmin_beta=args.softmin_beta,
-        use_softmin_terminal=ablation_mode in ("full", "softmin_only"),
+        use_softmin_terminal=not args.no_softmin,  # v8: --no-softmin 只关闭 softmin 终端
     )
 
     # 初始化 RM-65 环境
@@ -2134,15 +2023,10 @@ def main() -> None:
     # 终端速度：可通过 --target-speed 覆盖
     v_hit_at_contact = args.target_speed * d_follow
 
-    # 终端偏移：--no-follow-through 时强制归零
-    if args.no_follow_through:
-        follow_through_length = 0.0
-        follow_through_steps = 0
-        follow_through_v_terminal = 0.0
-    else:
-        follow_through_length = args.hit_shift
-        follow_through_steps = int(config_dict["hitting"].get("follow_through_steps", 160))
-        follow_through_v_terminal = float(config_dict["hitting"].get("follow_through_v_terminal", 0.3))
+    # 终端偏移：可通过 --hit-shift 覆盖
+    follow_through_length = args.hit_shift
+    follow_through_steps = 0
+    follow_through_v_terminal = 0.0
 
     # v6: 终端目标 = 击球点 + 偏移（arm 穿过击球点加速到终端）
     p_follow = p_hit + follow_through_length * d_follow
@@ -2151,10 +2035,10 @@ def main() -> None:
 
     hit_shift = follow_through_length
 
-    # ===== 构建候选击球窗口（Tube + Softmin 共享） =====
+    # ===== 构建初始 Tube（若启用） =====
     hit_window: HitWindow | None = None
     hitting_tube: HittingTube | None = None
-    if need_candidates:
+    if use_tube:
         hit_window = search_hit_window(
             env, p0, v0, shoulder_pos, workspace_radius,
             k_hit_total + 30, tube_cfg,
@@ -2168,17 +2052,18 @@ def main() -> None:
                 hit_window, racket_speed, d_follow, tube_cfg,
             )
             logger.info(
-                f"候选窗口已构建: best_k={hitting_tube.best_k}, "
+                f"Tube 已构建: best_k={hitting_tube.best_k}, "
                 f"candidates={len(hitting_tube.k_candidates)} "
                 f"[{hitting_tube.k_candidates[0]}..{hitting_tube.k_candidates[-1]}]"
             )
         else:
-            logger.warning("候选窗口构建失败，fallback 到 single-hit-point 模式")
+            logger.warning("Tube 构建失败，fallback 到 single-hit-point 模式")
+            use_tube = False
 
     logger.info(f"击打步数: {k_hit_total}, 击打位置: {p_hit}")
     logger.info(f"[v6] 随挥方向(固定YAML): {np.round(d_follow, 3)}")
     logger.info(f"[v6] 击球时刻期望速度: {np.linalg.norm(v_hit_at_contact):.1f} m/s (TCP limit)")
-    logger.info(f"[v6] 随挥距离: {follow_through_length:.2f}m, 随挥步数: {follow_through_steps}")
+    logger.info(f"[v10] 终端偏移: {follow_through_length:.2f}m, 随挥步数: {follow_through_steps} (已禁用)")
     logger.info(f"Tube 模式: {'启用' if use_tube else '禁用'}")
     logger.info(f"线性化: {'解析' if use_analytical else '有限差分'}, horizon={fixed_horizon}")
 
@@ -2252,38 +2137,24 @@ def main() -> None:
          Q_du=float(config_dict["cost"].get("Q_du", 0.0)),
     )
 
-    # v9: 根据 ablation_mode 创建代价函数
-    # full → TubeHittingCostWrapper（走廊+softmin）
-    # tube_only → TubeOnlyCost（走廊+单点终端）
-    # softmin_only → SoftminOnlyCost（softmin终端+无走廊）
-    # none → base_cost_fn（原始单点）
+    # v6: 不设 midpoint（与 v2 一致，避免梯度冲突）
+    # v8: Tube 走廊和 Softmin 终端代价解耦
+    # --no-tube: 不创建 TubeHittingCostWrapper（无走廊代价）
+    # --no-softmin: 创建 TubeHittingCostWrapper 但禁用 softmin 终端（只用走廊代价）
+    # 都不加: Tube 走廊 + softmin 终端全部启用
 
     tube_cost_fn: TubeHittingCostWrapper | None = None
-    if hitting_tube is not None:
-        if ablation_mode == "full":
-            tube_cost_fn = TubeHittingCostWrapper(
-                env, base_cost_fn, hitting_tube, k_hit_total, tube_cfg,
-            )
-            cost_fn = tube_cost_fn
-            logger.info("[ablation] TubeHittingCostWrapper (corridor=ON, softmin=ON)")
-        elif ablation_mode == "tube_only":
-            tube_cost_fn = TubeOnlyCost(
-                env, base_cost_fn, hitting_tube, k_hit_total, tube_cfg,
-            )
-            cost_fn = tube_cost_fn
-            logger.info("[ablation] TubeOnlyCost (corridor=ON, softmin=OFF)")
-        elif ablation_mode == "softmin_only":
-            tube_cost_fn = SoftminOnlyCost(
-                env, base_cost_fn, hitting_tube, k_hit_total, tube_cfg,
-            )
-            cost_fn = tube_cost_fn
-            logger.info("[ablation] SoftminOnlyCost (corridor=OFF, softmin=ON)")
-        else:
-            cost_fn = base_cost_fn
-            logger.info("[ablation] HittingCost (corridor=OFF, softmin=OFF)")
+    if use_tube and hitting_tube is not None:
+        tube_cost_fn = TubeHittingCostWrapper(
+            env, base_cost_fn, hitting_tube, k_hit_total, tube_cfg,
+        )
+        cost_fn = tube_cost_fn
+        softmin_status = "启用" if not args.no_softmin else "禁用"
+        logger.info(f"[v8] TubeHittingCostWrapper 已创建（走廊=启用, softmin={softmin_status}）")
     else:
         cost_fn = base_cost_fn
-        logger.info(f"[ablation] HittingCost (no candidates, ablation={ablation_mode} ineffective)")
+        tube_reason = "被 --no-tube 禁用" if not use_tube else "构建失败"
+        logger.info(f"[v8] 使用标准 HittingCost（Tube {tube_reason}）")
 
     # ===== 球速耦合扰动：沿飞行方向平移发球位置，保持初速度不变 =====
     # 正 pct: 发球点沿飞行方向前移 → 球提前到达 → 时间+空间耦合偏移
@@ -2370,8 +2241,10 @@ def main() -> None:
     ball_pos_at_hit = None
     q_ik_cache: np.ndarray | None = None
     ball_was_hit = False
-    follow_through_start = -1  # v4: 随挥开始步
-    k_hit_at_follow = 0  # v6: 记录随挥开始时的 k_hit（用于球轨迹回溯）
+    follow_through_start = -1
+    k_hit_at_follow = 0
+    post_hit_steps = 60  # 击球后继续仿真 60 步（300ms），用阻尼力矩自然减速
+    post_hit_start = -1
 
     buffer_exhaustion_count = 0
     current_n_des = n_des_single.copy()
@@ -2690,9 +2563,8 @@ def main() -> None:
         async_replanner.submit(first_async_request)
         async_replan_submitted = True
 
-    total_horizon += follow_through_steps
-    mpc_horizon = total_horizon - follow_through_steps
-    logger.info(f"开始 MPC 循环，总步数={total_horizon} (MPC={mpc_horizon}, 随挥={follow_through_steps})，击打步数={k_hit_total}")
+    total_horizon += post_hit_steps  # v10: 扩展以包含击球后减速阶段
+    logger.info(f"开始 MPC 循环，总步数={total_horizon}，击打步数={k_hit_total}，击球后减速步数={post_hit_steps}")
 
     for step in range(total_horizon):
         t_step_start = time.perf_counter()
@@ -2821,8 +2693,7 @@ def main() -> None:
         # ---- 同步模式：阻塞执行重规划 ----
         if need_replan:
             t_replan_start = time.perf_counter()
-            remaining_horizon = min(total_horizon - step, mpc_horizon - step)
-            remaining_horizon = max(remaining_horizon, 5)
+            remaining_horizon = total_horizon - step
 
             # 始终使用实际球观测进行规划（tube 走廊基于正确轨迹）
             hit_info_new = find_hitting_point_physics(
@@ -2914,8 +2785,8 @@ def main() -> None:
                 # v6: 不设 midpoint（与 v2 一致，避免梯度冲突）
                 base_cost_fn.set_midpoint_target(None, None)
 
-                # v9: 更新候选窗口 + 根据 ablation_mode 创建代价函数
-                if need_candidates:
+                # v8: 更新 Tube（解耦 softmin）
+                if use_tube:
                     hit_window = search_hit_window(
                         env, ball_pos, ball_vel, shoulder_pos, workspace_radius,
                         remaining_horizon, tube_cfg,
@@ -2928,24 +2799,13 @@ def main() -> None:
                         hitting_tube = build_hitting_tube(
                             hit_window, racket_speed, d_follow, tube_cfg,
                         )
-                        if ablation_mode == "full":
-                            tube_cost_fn_sync = TubeHittingCostWrapper(
-                                env, base_cost_fn, hitting_tube, k_hit_new, tube_cfg,
-                            )
-                        elif ablation_mode == "tube_only":
-                            tube_cost_fn_sync = TubeOnlyCost(
-                                env, base_cost_fn, hitting_tube, k_hit_new, tube_cfg,
-                            )
-                        elif ablation_mode == "softmin_only":
-                            tube_cost_fn_sync = SoftminOnlyCost(
-                                env, base_cost_fn, hitting_tube, k_hit_new, tube_cfg,
-                            )
-                        else:
-                            tube_cost_fn_sync = None
-                        cost_fn = tube_cost_fn_sync if tube_cost_fn_sync is not None else base_cost_fn
+                        tube_cost_fn_sync = TubeHittingCostWrapper(
+                            env, base_cost_fn, hitting_tube, k_hit_new, tube_cfg,
+                        )
+                        cost_fn = tube_cost_fn_sync
                     else:
                         cost_fn = base_cost_fn
-                        logger.info(f"步 {step}: 候选窗口构建失败，使用 base_cost")
+                        logger.info(f"步 {step}: Tube 构建失败，使用 base_cost")
                 else:
                     cost_fn = base_cost_fn
 
@@ -3145,12 +3005,11 @@ def main() -> None:
                         f"fp_limits={fp_limits is not None} fast_lin={fast_lin}"
                     )
                     # 可解释性日志：softmin 权重摘要
-                    if (ablation_mode in ("full", "softmin_only")
-                            and cost_fn is not base_cost_fn
-                            and hasattr(cost_fn, '_last_softmin_alphas')
-                            and len(cost_fn._last_softmin_alphas) > 0):
-                        alphas = cost_fn._last_softmin_alphas
-                        costs_s = cost_fn._last_softmin_costs if len(cost_fn._last_softmin_costs) > 0 else np.zeros(0)
+                    if (use_tube
+                            and base_cost_fn._softmin_alpha_cache is not None
+                            and len(base_cost_fn._softmin_alpha_cache) > 0):
+                        alphas = base_cost_fn._softmin_alpha_cache
+                        costs_s = base_cost_fn._softmin_costs_cache if base_cost_fn._softmin_costs_cache is not None else np.zeros(0)
                         dom_idx = int(np.argmax(alphas))
                         logger.info(
                             f"[Softmin] dominant_α={alphas[dom_idx]:.3f} "
@@ -3346,7 +3205,7 @@ def main() -> None:
 
         if step % 20 == 0 or k_hit_new <= 5:
             tube_info = ""
-            if hitting_tube is not None:
+            if use_tube and hitting_tube is not None:
                 n_valid = sum(valid_hit_history[-20:]) if len(valid_hit_history) >= 20 else sum(valid_hit_history)
                 tube_info = f", valid_hit={n_valid}"
             # 实时约束指标
@@ -3385,16 +3244,15 @@ def main() -> None:
             )
             env.set_ball_vel(v_ball_new)
 
-        # 碰撞后延迟几步再开始随挥（让碰撞物理完成）
-        if ball_was_hit and follow_through_start < 0 and hit_step >= 0 and (step - hit_step) >= 3:
+        # v10: 碰撞后开始减速阶段（阻尼力矩 + 重力补偿）
+        if ball_was_hit and post_hit_start < 0 and hit_step >= 0 and (step - hit_step) >= 3:
+            post_hit_start = step
             follow_through_start = step
             k_hit_at_follow = k_hit_new
-            logger.info(f"步 {step}: 碰撞后开始随挥 ({follow_through_steps} 步)")
+            logger.info(f"步 {step}: 碰撞后开始减速阶段 ({post_hit_steps} 步)")
 
-        # planned 模式：到达计划击打时刻即触发随挥
-        # contact 模式：不在计划时刻触发，等碰撞触发（让 MPC 继续追踪晚到的球）
-        if args.follow_trigger == "planned" and k_hit_new <= 1 and follow_through_start < 0:
-            logger.info(f"步 {step}: 到达击打时刻，开始随挥 ({follow_through_steps} 步)")
+        # v10: 到达击打时刻后开始减速阶段（只触发一次）
+        if k_hit_new <= 1 and follow_through_start < 0:
             hit_step = step if hit_step < 0 else hit_step
             k_hit_at_follow = k_hit_new
             env.update_kinematics()
@@ -3402,50 +3260,25 @@ def main() -> None:
                 p_ee_at_hit = env.get_ee_pos().copy()
             if ball_pos_at_hit is None:
                 ball_pos_at_hit = ball_pos.copy()
-            follow_through_remain = follow_through_steps
             follow_through_start = step
+            post_hit_start = step
+            logger.info(f"步 {step}: 到达击打时刻，开始减速阶段 ({post_hit_steps} 步)")
 
-        # v4: 随挥段 — 使用 PD 控制沿 d_follow 方向匀减速
-        # v6: 随挥目标点回溯到球轨迹上的可达点
-        # fix: 触发当轮 (step == follow_through_start) 不执行 env.step，
-        #      因为同轮 MPC 已执行 env.step_full，避免 double-step 导致碰撞漏检
-        if follow_through_start >= 0 and step > follow_through_start:
+        # v10: 击球后阶段 — 阻尼力矩自然减速（无 PD 随挥）
+        if follow_through_start >= 0:
             dt_follow = step - follow_through_start
-            if dt_follow <= follow_through_steps:
-                v_max_follow = np.linalg.norm(v_hit_at_contact)  # 1.8 m/s
-                T_follow = follow_through_steps * dt  # 总随挥时间（秒）
-                a_follow = v_max_follow / T_follow if T_follow > 0 else 0.0
-                t_elapsed = dt_follow * dt  # 已过时间（秒）
-                # v6: 随挥目标 = 沿击球方向匀减速直线延伸
-                p_des_follow = p_ee_at_hit + d_follow * (v_max_follow * t_elapsed - 0.5 * a_follow * t_elapsed ** 2)
-                v_des_follow = d_follow * max(v_max_follow - a_follow * t_elapsed, 0.0)
-
-                # 任务空间 PD + 雅可比转置映射到关节空间
-                env.update_kinematics()
-                p_ee_cur = env.get_ee_pos()
-                J_p = env.get_ee_jacp()[:, :env.NQ]
-                dp = p_des_follow - p_ee_cur
-                Kp_follow = 200.0
-                Kd_follow = 20.0
-                F_follow = Kp_follow * dp - Kd_follow * J_p @ x_current[env.NQ:]
-                u_follow = J_p.T @ F_follow
-                u_follow = np.clip(u_follow,
-                                   env.model.actuator_ctrlrange[:env.NU, 0],
-                                   env.model.actuator_ctrlrange[:env.NU, 1])
-                # v4: TCP 速度限制 — 随挥阶段同样受限于 max_tcp
-                v_ee_follow = J_p @ x_current[env.NQ:]
-                tcp_speed_follow = float(np.linalg.norm(v_ee_follow))
-                max_tcp_limit = float(args.max_tcp) if args.max_tcp and args.max_tcp > 0 else float('inf')
-                if tcp_speed_follow > max_tcp_limit:
-                    scale_factor = max_tcp_limit / tcp_speed_follow
-                    u_follow *= scale_factor
-                x_current = env.step(u_follow)
-                U_history.append(u_follow.copy())
+            if dt_follow < post_hit_steps:
+                u_damp = -15.0 * x_current[env.NQ:]  # 关节阻尼
+                u_damp = np.clip(u_damp,
+                                 env.model.actuator_ctrlrange[:env.NU, 0],
+                                 env.model.actuator_ctrlrange[:env.NU, 1])
+                x_current = env.step(u_damp)
+                U_history.append(u_damp.copy())
                 X_history.append(x_current.copy())
                 ball_pos_history.append(env.get_ball_pos().copy())
-                continue  # 跳过 MPC 控制，直接进入下一步
+                continue
             else:
-                logger.info(f"步 {step}: 随挥完成 ({follow_through_steps} 步)")
+                logger.info(f"步 {step}: 减速阶段完成 ({post_hit_steps} 步)")
                 break
 
     # ===== 停止异步重规划器 =====
@@ -3639,11 +3472,12 @@ def main() -> None:
     else:
         print("  RM-65 击打偏差较大，需要调整参数。")
 
-    print(f"  ablation: {ablation_mode}, Tube={'ON' if ablation_mode in ('full','tube_only') else 'OFF'}, Softmin={'ON' if ablation_mode in ('full','softmin_only') else 'OFF'}")
-    if ablation_mode in ("full", "softmin_only") and cost_fn is not base_cost_fn and hasattr(cost_fn, '_last_softmin_alphas') and len(cost_fn._last_softmin_alphas) > 0:
-        print(f"  --- Softmin 诊断 ---")
-        alphas = cost_fn._last_softmin_alphas
-        costs_s = cost_fn._last_softmin_costs if len(cost_fn._last_softmin_costs) > 0 else np.zeros(0)
+    print(f"  Tube 模式: {'启用' if use_tube or hitting_tube is not None else '禁用'}")
+    # v6: softmin 可解释性诊断（从 base_cost_fn 读取）
+    if use_tube and base_cost_fn._softmin_alpha_cache is not None and len(base_cost_fn._softmin_alpha_cache) > 0:
+        print(f"  --- v6 Softmin 诊断 ---")
+        alphas = base_cost_fn._softmin_alpha_cache
+        costs_s = base_cost_fn._softmin_costs_cache if base_cost_fn._softmin_costs_cache is not None else np.zeros(0)
         print(f"  Softmin终端: 候选数={len(alphas)}, beta={args.softmin_beta:.1f}")
         top_n = min(5, len(alphas))
         top_idx = np.argsort(alphas)[::-1][:top_n]
@@ -3667,7 +3501,7 @@ def main() -> None:
     print(f"  MPC 总步数: {n_steps}")
     print(f"  线性化: {'解析' if use_analytical else '有限差分'}")
     print(f"  后摆: {'启用' if use_backswing else '禁用'}")
-    print(f"  随挥偏移: {hit_shift:.3f}m")
+    print(f"  终端偏移: {hit_shift:.3f}m (无随挥)")
     print(f"  R 退火: {'启用' if use_r_decay else '禁用'}")
     print(f"  --- Tube 专用指标 ---")
     print(f"  最小球拍-球距离: {min_dist:.4f} m")

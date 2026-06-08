@@ -1,8 +1,13 @@
-"""RM-65 V9: V8 + 更长随挥距离。
+"""RM-65 V11: V9 bug 修复 + 算法改进。
 
-=== V9 vs V8 ===
-  - follow_through_length: 0.01m → 0.20m（随挥延伸更远）
-  - follow_through_steps: 40 → 80（随挥时间更长，充分减速）
+=== V11 vs V9 ===
+  - 修复: X 平面墙检查现在正确读取预测状态（set_arm_state(x_pred)）
+  - 修复: do_replan 中构建 Tube/Softmin 代价（与主循环一致）
+  - 修复: search_hit_window current_step 传入当前 MPC 步数
+  - 改进: 随挥 PD 控制器加 X 平面墙安全检查
+  - 改进: 权重调度改为 sigmoid 平滑过渡（消除 40x Q_v 跳变）
+  - 改进: 远段跑 1-2 次轻量 iLQR（替代纯 JT 控制）
+  - 改进: mpc_horizon 结束后强制触发随挥（contact 模式不再卡住）
   - hit-shift 默认值: 0.01 → 0.20
   - 其余逻辑与 V8 完全一致
 
@@ -12,8 +17,8 @@
   - PD 随挥控制器（击球后接管）
 
 用法:
-  python scripts/rm65_mpc_v9.py --serve-box --ball-speed 7 --viewer
-  python scripts/rm65_mpc_v9.py --serve-box --ball-speed 7 --no-backswing
+  python scripts/rm65_mpc_v11.py --serve-box --ball-speed 7 --viewer
+  python scripts/rm65_mpc_v11.py --serve-box --ball-speed 7 --no-backswing
 """
 
 from __future__ import annotations
@@ -1568,13 +1573,11 @@ def do_replan(
     env_plan.update_kinematics()
     pos_err_now = float(np.linalg.norm(env_plan.get_ee_pos() - p_hit_new))
 
-    if pos_err_now > 0.10:
-        Q_p_scale = cfg["Q_p_scale_far"]
-        Q_v_scale = cfg["Q_v_scale_far"]
-    else:
-        ratio = pos_err_now / 0.10
-        Q_p_scale = cfg["Q_p_scale_near"] + (cfg["Q_p_scale_far"] - cfg["Q_p_scale_near"]) * ratio
-        Q_v_scale = cfg["Q_v_scale_near"] + (cfg["Q_v_scale_far"] - cfg["Q_v_scale_near"]) * ratio
+    _tc = 0.10
+    _tw = 0.03
+    _s = 1.0 / (1.0 + np.exp(-(pos_err_now - _tc) / _tw))
+    Q_p_scale = cfg["Q_p_scale_near"] + (cfg["Q_p_scale_far"] - cfg["Q_p_scale_near"]) * _s
+    Q_v_scale = cfg["Q_v_scale_near"] + (cfg["Q_v_scale_far"] - cfg["Q_v_scale_near"]) * _s
 
     # 7. 迭代策略（与主循环同步策略保持一致）
     near_threshold = cfg["near_threshold"]
@@ -1630,7 +1633,6 @@ def do_replan(
 
     # 9. 构建 cost_fn（使用临时 cost_fn，env_plan 独立 MjData）
     Q_p_mat = Q_p_scale * np.eye(3)
-    # v6: 满秩 Q_v（与 v2 一致）
     Q_v_mat = Q_v_scale * np.eye(3)
     R_mat = cfg["R"] * np.eye(env_plan.NU)
     max_tcp_val = float(cfg.get("max_tcp_speed", 1.8))
@@ -1645,6 +1647,40 @@ def do_replan(
             decay_ratio=cfg.get("r_decay_ratio", 0.3),
         )[:horizon_plan]
         cost_fn_plan.set_R_schedule(R_schedule)
+
+    # v11: do_replan 中也构建 Tube/Softmin 代价（与主循环一致）
+    ablation_mode_replan = cfg.get("ablation_mode", "full")
+    need_candidates_replan = ablation_mode_replan in ("full", "tube_only", "softmin_only")
+    if need_candidates_replan and horizon_full > 5:
+        tube_cfg_replan = cfg.get("tube_cfg", None)
+        if tube_cfg_replan is not None:
+            hit_window_replan = search_hit_window(
+                env_plan, ball_pos, ball_vel,
+                cfg["shoulder_pos"], cfg["workspace_radius"],
+                remaining_horizon, tube_cfg_replan,
+                ball_direction="y",
+                current_step=0,
+                robot_limits=cfg["robot_limits"],
+                init_q=x_current[:env_plan.NQ].copy(),
+            )
+            if hit_window_replan is not None:
+                racket_speed_replan = float(cfg.get("racket_speed", 5.0))
+                d_follow_replan = cfg.get("d_follow", cfg["d_hat"])
+                hitting_tube_replan = build_hitting_tube(
+                    hit_window_replan, racket_speed_replan, d_follow_replan, tube_cfg_replan,
+                )
+                if ablation_mode_replan == "full":
+                    cost_fn_plan = TubeHittingCostWrapper(
+                        env_plan, cost_fn_plan, hitting_tube_replan, k_hit_new, tube_cfg_replan,
+                    )
+                elif ablation_mode_replan == "tube_only":
+                    cost_fn_plan = TubeOnlyCost(
+                        env_plan, cost_fn_plan, hitting_tube_replan, k_hit_new, tube_cfg_replan,
+                    )
+                elif ablation_mode_replan == "softmin_only":
+                    cost_fn_plan = SoftminOnlyCost(
+                        env_plan, cost_fn_plan, hitting_tube_replan, k_hit_new, tube_cfg_replan,
+                    )
 
     # v6: 不设 midpoint（与 v2 一致，避免梯度冲突）
 
@@ -1735,7 +1771,7 @@ def main() -> None:
     parser.add_argument("--fix-joint5", action="store_true", help="固定第 6 关节")
     parser.add_argument("--backswing", type=float, default=0.6, help="后摆幅度 (rad)")
     parser.add_argument("--bs-ratio", type=float, default=0.35, help="后摆占比")
-    parser.add_argument("--no-backswing", action="store_true", help="禁用后摆")
+    parser.add_argument("--use-backswing", action="store_true", help="启用后摆（v11 默认无后摆）")
     parser.add_argument("--r-decay", type=float, default=0.40, help="R 衰减占比")
     parser.add_argument("--no-r-decay", action="store_true", help="禁用 R 退火")
     parser.add_argument("--hit-shift", type=float, default=0.0, help="随挥偏移距离 (m)")
@@ -1924,7 +1960,7 @@ def main() -> None:
     init_q_left = np.array([-0.373, -1.57, 0.236, -0.404, -0.446, -2.45], dtype=np.float64)
 
     fix_joint5_angle: float | None = init_q[5] if args.fix_joint5 else None
-    use_backswing = not args.no_backswing
+    use_backswing = args.use_backswing
     backswing_offset = -abs(args.backswing)
     backswing_ratio = args.bs_ratio
     use_r_decay = not args.no_r_decay
@@ -2620,6 +2656,9 @@ def main() -> None:
         "max_tcp_speed": float(args.max_tcp) if args.max_tcp and args.max_tcp > 0 else 1.8,
         "no_v_maximize": args.no_v_maximize,
         "normal_weight": args.normal_weight,
+        "ablation_mode": ablation_mode,
+        "tube_cfg": tube_cfg,
+        "racket_speed": float(config_dict["hitting"]["racket_speed"]),
     }
     async_replanner = AsyncReplanner(env, do_replan, replan_cfg, state=replan_state, model_path=model_path)
     async_replanner.start()
@@ -2697,6 +2736,15 @@ def main() -> None:
     for step in range(total_horizon):
         t_step_start = time.perf_counter()
 
+        # v11: MPC 阶段结束但随挥未触发 → 强制触发
+        if step >= mpc_horizon and follow_through_start < 0:
+            follow_through_start = step
+            if p_ee_at_hit is None:
+                p_ee_at_hit = env.get_ee_pos().copy()
+            if ball_pos_at_hit is None:
+                ball_pos_at_hit = ball_pos if 'ball_pos' in dir() else env.get_ball_pos().copy()
+            logger.info(f"步 {step}: MPC 阶段结束，强制开始随挥 ({follow_through_steps} 步)")
+
         ball_pos, ball_vel = env.get_ball_state()
         env.update_kinematics()
 
@@ -2743,7 +2791,7 @@ def main() -> None:
 
         valid_hit_history.append(is_ball_near or is_tube_ready)
 
-        need_replan = (step % replan_interval == 0) or (step == 0) or (buffer_idx >= len(U_buffer))
+        need_replan = ((step % replan_interval == 0) or (step == 0) or (buffer_idx >= len(U_buffer))) and step < mpc_horizon
 
         # ---- 异步模式：检查结果 / 提交请求 ----
         if async_mode:
@@ -2971,13 +3019,12 @@ def main() -> None:
                     env.update_kinematics()
                     pos_err_now = np.linalg.norm(env.get_ee_pos() - p_hit_new)
 
-                    if pos_err_now > 0.10:
-                        Q_p_scale = Q_p_scale_far
-                        Q_v_scale = Q_v_scale_far
-                    else:
-                        ratio = pos_err_now / 0.10
-                        Q_p_scale = Q_p_scale_near + (Q_p_scale_far - Q_p_scale_near) * ratio
-                        Q_v_scale = Q_v_scale_near + (Q_v_scale_far - Q_v_scale_near) * ratio
+                    # v11: sigmoid 平滑权重调度（替代硬阈值线性插值）
+                    _transition_center = 0.10
+                    _transition_width = 0.03
+                    _s = 1.0 / (1.0 + np.exp(-(pos_err_now - _transition_center) / _transition_width))
+                    Q_p_scale = Q_p_scale_near + (Q_p_scale_far - Q_p_scale_near) * _s
+                    Q_v_scale = Q_v_scale_near + (Q_v_scale_far - Q_v_scale_near) * _s
 
                     cost_fn.update_weights(Q_p_scale, Q_v_scale)
 
@@ -3208,6 +3255,7 @@ def main() -> None:
                 u_try_x = fix_joint5_control(u_try_x, fix_joint5_angle, x_current, env.NQ)
 
             x_pred = env.step_from_state(x_current, u_try_x)
+            env.set_arm_state(x_pred)
             env.update_kinematics()
             ok_x = all(env.data.xpos[bid, 0] <= -0.1 for bid in _hard_x_body_ids)
 
@@ -3439,6 +3487,23 @@ def main() -> None:
                 if tcp_speed_follow > max_tcp_limit:
                     scale_factor = max_tcp_limit / tcp_speed_follow
                     u_follow *= scale_factor
+                # v11: X 平面墙检查 — 随挥阶段也检查不越界
+                ball_save_ft = env.get_ball_state()
+                x_save_ft = x_current.copy()
+                for beta_ft in [1.0, 0.6, 0.3, 0.0]:
+                    u_try_ft = beta_ft * u_follow
+                    u_try_ft = np.clip(u_try_ft,
+                                       env.model.actuator_ctrlrange[:env.NU, 0],
+                                       env.model.actuator_ctrlrange[:env.NU, 1])
+                    x_pred_ft = env.step_from_state(x_current, u_try_ft)
+                    env.set_arm_state(x_pred_ft)
+                    env.update_kinematics()
+                    ok_ft = all(env.data.xpos[bid, 0] <= -0.1 for bid in _hard_x_body_ids)
+                    env.set_ball_state(*ball_save_ft)
+                    env.set_arm_state(x_save_ft)
+                    if ok_ft:
+                        u_follow = u_try_ft
+                        break
                 x_current = env.step(u_follow)
                 U_history.append(u_follow.copy())
                 X_history.append(x_current.copy())
