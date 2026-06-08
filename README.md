@@ -44,6 +44,9 @@ python scripts/rm65_mpc_tube_constraint.py --serve-box --ball-speed 9 --no-plot
 # 离线批量实验（多进程并行）
 python scripts/exp/run_exp1_v3_batch.py --workers 4
 
+# 感知实验：噪声 + 卡尔曼滤波恢复（exp8，10,000 runs）
+python scripts/exp/run_exp8_batch.py --workers 4
+
 # 结果提取
 python scripts/extract/extract_exp1_v3_results.py
 ```
@@ -159,6 +162,25 @@ score = 距离 + 高度惩罚 − 前方优先
 ```
 选择 score 最低的帧作为击打点。
 
+### 感知层：BallEstimator 6D 卡尔曼滤波器
+
+在噪声观测下估计球的真实位置和速度，为规划器提供更稳定的状态估计：
+
+```
+状态向量: x = [px, py, pz, vx, vy, vz]  （6D 位置+速度）
+过程模型: 匀速 + 重力（F 矩阵考虑 g=9.81 对 Vz 的衰减）
+观测模型: H = I₆（全状态直接观测）
+弹跳保护: Z < 0.01m 时 slam 位置、速度处理反弹/落地
+```
+
+**RM65Env 透明集成**（默认关闭，零侵入）：
+```python
+env = RM65Env(estimator_config={"enabled": True, "obs_pos_std": 0.05, "obs_vel_std": 0.3})
+pos, vel = env.get_ball_state()  # 噪声注入 → KF 滤波 → 返回估计值
+```
+
+三层感知架构：仿真真值 → 噪声注入（`add_observation_noise`）→ 卡尔曼滤波（`BallEstimator`）→ 规划消费。
+
 ---
 
 ## 目录结构
@@ -207,6 +229,8 @@ mujoco_sim/
 │   ├── dynamics/
 │   │   ├── linearize.py               # 解析/有限差分动力学线性化
 │   │   └── simulate.py                # 前向仿真 / rollout
+│   ├── perception/
+│   │   └── ball_estimator.py          # 6D 卡尔曼滤波器（球位置+速度估计）
 │   ├── tennis/
 │   │   ├── ball.py                    # 网球抛物线轨迹 + 弹跳模型 + 发球生成
 │   │   └── hitting.py                 # 击打点搜索 + 期望击打速度计算

@@ -121,6 +121,9 @@ mujoco_sim/
 │   │   ├── env.py                     # MujocoEnv 基类
 │   │   ├── rm65_env.py                # RM65Env 双臂环境封装
 │   │   └── viewer.py                  # 可视化工具
+│   ├── perception/                    # 感知模块（噪声+滤波）
+│   │   ├── __init__.py
+│   │   └── ball_estimator.py          # 6D 卡尔曼滤波器（位置+速度，匀速+重力过程模型）
 │   ├── tennis/                        # 网球场景相关
 │   │   ├── __init__.py
 │   │   ├── ball.py                    # 网球抛物线轨迹预测
@@ -158,7 +161,9 @@ mujoco_sim/
 │   ├── test_linearize.py
 │   ├── test_mpc.py
 │   ├── test_ball.py
-│   └── test_noise.py
+│   ├── test_noise.py
+│   ├── test_ball_estimator.py              # BallEstimator 单元+集成测试（16 tests）
+│   └── test_estimator_pipeline.py          # 感知 pipeline 端到端测试（7 tests）
 ├── experiment_data/                  # 实验数据（按 exp1~exp7 组织）
 │   └── README.md                     # 数据存储规范
 ├── paper/                            # 论文 LaTeX 工程
@@ -243,7 +248,7 @@ mujoco_sim/
 - serve_box 模式：从 8m×0.2m×0.3m 范围内随机发球
 
 ### 噪声注入（`src/utils/noise.py`）
-- **模块状态**：已开发，测试通过（17 tests），尚未集成到主脚本
+- **模块状态**：已开发，测试通过（17 tests），已通过 exp7（噪声×Tube 消融）和 exp8（KF 恢复）实验集成验证
 - **三个纯函数**：
   - `add_observation_noise`：球位置/速度观测噪声，支持标量 std（向后兼容）和 per-axis std（各向异性，如深度方向误差更大），per-axis 优先；Z 坐标 clamp ≥ 0.01m 防止球在地下
   - `add_torque_noise`：力矩执行噪声（暂不在实验中使用）
@@ -258,6 +263,37 @@ mujoco_sim/
 - **噪声特性**：零均值高斯、独立同分布、seed 可复现、不修改输入数组
 - **未建模的二阶效应**（经评估暂不修复）：位置/速度相关性、距离相关 std、速度裁剪
 - **集成验证**：`scripts/test/test_noise_integration.py`（一次性工具，不进 git），σ_p=0.03/σ_v=0.3 下规划成功率下降 15%，p_hit 偏差均值 125mm
+
+### 感知模块（`src/perception/ball_estimator.py`）
+- **模块状态**：已开发，测试通过（16 单元+集成 tests + 7 端到端 pipeline tests），已永久集成到 `RM65Env`
+- **架构**：6D 线性卡尔曼滤波器，状态 x = [px, py, pz, vx, vy, vz]，全状态观测
+- **过程模型**：匀速 + 重力（g=9.81），F 矩阵考虑重力加速度对速度的衰减
+- **观测模型**：全状态直接观测（位置+速度），H = I₆
+- **弹跳保护**：观测 Z < 0.01m 时将位置 slam 为 min(z_obs, 0.01)，速度 Vz > 0 时保持（反弹），Vz ≤ 0 时置零（落地）
+- **per-axis R 矩阵**：观测噪声协方差支持标量（各向同性）和 per-axis std（各向异性，精确匹配 exp8 五级噪声）
+- **RM65Env 集成方式**（零侵入，默认关闭）：
+  ```python
+  env = RM65Env(estimator_config={"enabled": True, "obs_pos_std": 0.05, "obs_vel_std": 0.3})
+  pos, vel = env.get_ball_state()   # 返回 KF 滤波后的估计值
+  pos = env.get_ball_pos()          # 快捷方法
+  vel = env.get_ball_vel()          # 快捷方法
+  ```
+  - `estimator_config=None`（默认）：直接读真值，零开销
+  - `estimator_config` 启用时：`reset()` 自动清空 estimator，`get_ball_state()` 注入噪声→KF update→返回估计
+- **dt 时序陷阱与修复**（exp8 墙钟时间 bug）：
+  - 问题：`BallEstimator.update()` 用 `perf_counter()` 墙钟时间（~20ms）作为预测 dt，物理仅 5ms → 66mm 系统偏差
+  - 修复：wrapper 中每次 `update` 前强制 `_last_update_time = perf_counter() - dt` → 偏差降至 7.5mm
+  - 根本原因：KF 内部使用墙钟时间假设实时调用，但仿真中物理步长固定 5ms
+- **exp8 核心结论**（10,000 runs, 2h27min）：
+  - off+kf: 52.2-52.6%（性能税 -20~29pp，根因 7.5mm 残留偏差 + 每步 2 次 update）
+  - lo+kf: 13.4-15.2%（绝对恢复 +12-14pp, 相对恢复 ~17%）
+  - anis+kf: 8.0-10.8%（意外好，per-axis R 建模有效）
+  - mid/hi+kf: 1.2-5.2%（恢复微弱）
+  - Tube 无交互效应（与 exp7 一致）
+- **三层感知架构**：仿真层真值 → 实验层噪声注入（`add_observation_noise`）→ 感知层滤波（`BallEstimator`）→ 规划层消费（`get_ball_state`）
+- **测试文件**：
+  - `tests/test_ball_estimator.py`：16 个单元+集成测试（初始化/预测/更新/弹跳/per-axis R/收敛性）
+  - `tests/test_estimator_pipeline.py`：7 个端到端 pipeline 测试（噪声→KF→规划链路验证）
 
 ## 优化策略
 - **雅可比转置初始控制（JT warm-start）**：使用 `J^T * (p_hit - p_ee)` 生成初始控制序列，远优于零/常数力矩初始猜测
@@ -369,6 +405,7 @@ mujoco_sim/
 | `scripts/rm65_mpc_tube_constraint_realtime_v5.py` | 实时 v5（sim/） | 主动击球+随挥+空间走廊Tube+多层安全滤波+异步重规划 |
 | `scripts/rm65_mpc_tube_constraint_realtime.py` | 实时仿真 v1 | 异步重规划+buffer机制 |
 | `scripts/exp/run_tcp_limit_experiment_v3.py` | TCP 限速实验 | monkey-patch 安全滤波器注入 TCP 检查 |
+| `scripts/exp/_run_exp7_kf.py` | exp8 KF 过滤包装 | estimator 模块级变量 + dt 强制修正 + 噪声互斥 assert |
 | `scripts/sim/rm65_mpc_ilqt.py` | 简化 MPC+iLQR | 无 Tube，基础两阶段 iLQR |
 | `scripts/sim/train_ilqt.py` | 离线训练入口 | 单次 iLQR 优化 + 保存轨迹 |
 | `scripts/tools/rm65_joint_viewer.py` | 关节调节查看器 | position 执行器，拖动滑条控制关节角 |
