@@ -1,7 +1,7 @@
 ---
 description: 执行 MPC+iLQR+Tube 网球击打实验（搭建脚本→批量运行→提取CSV），支持离线和实时 v5 两种模式
 mode: subagent
-model: deepseek/deepseek-v4-flash
+model: glm-5.1
 temperature: 0.0
 hidden: false
 permission:
@@ -59,6 +59,9 @@ permission:
    失败则立即报告，不继续。
 4. **启动前必须检查断点续传**：运行 `ls <RAW_DIR>/*.log 2>/dev/null | wc -l`，
    报告已有 runs 数。若 >0，在返回信息中注明。
+5. **启动后绝不检查进度**。tmux 启动成功后立即返回确认信息。
+   不运行 `ls raw/`、`wc -l`、`cat .progress`、`tmux has-session` 等检查命令。
+   这些命令是给主 Agent 后续手动检查用的，不是 subagent 执行的。
 
 ---
 
@@ -377,6 +380,8 @@ total_runs: <len(speeds) * len(tube_modes) * seeds>
 你的职责是启动实验并立即返回状态信息，**不等待结果**。
 提取和数据分析留给主 Agent 后续处理。
 
+> ⚠️ 以下"进度检查"和"重新连接"命令是给主 Agent 后续手动使用的，**subagent 不执行这些命令**。
+
 ### 返回格式
 
 ```
@@ -434,9 +439,12 @@ tmux new-session -d -s <EXPERIMENT_ID> "bash -c '
 | `<DATA_DIR>/.progress` | 当前阶段文本（`START` → `EXTRACT` → `DONE`）|
 | `<DATA_DIR>/_.COMPLETE` | 完成标记（全部成功时写入）|
 
-### 7.3 返回格式
+### 7.3 返回与终止
 
-启动命令执行成功后，立即向主 Agent 返回（格式见第 6 节）。
+tmux 启动命令执行成功后，**立即**向主 Agent 返回确认信息（第 6 节格式）。
+**不要**执行任何后续 bash 命令来"验证"实验是否正在运行。
+
+---
 
 ### 7.4 注意事项
 
@@ -447,3 +455,36 @@ tmux new-session -d -s <EXPERIMENT_ID> "bash -c '
 - 若 `_.COMPLETE` 不存在且 session 已死 → 某步失败，用 `tmux attach` 检查或查看 `.progress`
 - 断点续传：批量运行器内置 `log_path.exists()` 跳过，中断后重跑安全
 - SSH 断开后 tmux session 不受影响，重连后 `tmux attach -t <ID>` 恢复
+
+---
+
+## 第 8 节：执行纪律（禁令）
+
+**核心原则：subagent 唯一职责是搭建+启动，启动后立即终止。**
+
+### 绝对禁止的行为
+
+| # | 禁令 | 原因 |
+|---|------|------|
+| G1 | 禁止在 tmux 启动后执行任何 bash 命令 | 额外 bash 调用会阻塞主 agent |
+| G2 | 禁止轮询实验进度（`ls raw/`、`wc -l`、`cat .progress`、`tmux has-session`） | 轮询是主 agent 的职责 |
+| G3 | 禁止读取/分析日志文件内容 | 大量 IO 浪费 token 和时间 |
+| G4 | 禁止在启动后做"验证性"操作（检查文件是否存在、验证 CSV） | 验证留给主 agent |
+| G5 | 禁止在整个任务中执行超过 5 个 bash 命令 | 每个命令都消耗 wall time |
+| G6 | 禁止使用长命令链（`&&` 链接超过 3 个命令） | 增加执行时间和出错概率 |
+
+### 允许的 bash 命令（上限 5 个）
+
+1. 环境预检：`python -c "import mujoco; print(mujoco.__version__)"`
+2. 创建数据目录：`mkdir -p <RAW_DIR>`
+3. 断点续传检查：`ls <RAW_DIR>/*.log 2>/dev/null | wc -l`
+4. 启动 tmux：`tmux new-session -d -s ...`
+5. （可选）编写脚本后的语法检查：`python -m py_compile <path>`
+
+### 执行流程
+
+```
+环境预检 → 创建目录 → [编写脚本] → 断点续传检查 → 启动 tmux → 立即返回
+```
+
+**在 `tmux new-session` 成功后，subagent 必须立即输出返回信息并结束。不做任何后续操作。**

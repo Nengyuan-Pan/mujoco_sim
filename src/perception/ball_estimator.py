@@ -166,6 +166,18 @@ class BallEstimator:
 
         return self._x[:3].copy(), self._x[3:].copy()
 
+    def predict_only(self, dt: float) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
+        """仅执行预测步，不校正。用于非观测步的协方差传播。
+
+        Args:
+            dt: 预测时间步长（s）。
+
+        Returns:
+            (pred_pos, pred_vel) 预测的球位置和速度。
+        """
+        self._predict(dt)
+        return self._x[:3].copy(), self._x[3:].copy()
+
     def update_noise_params(
         self,
         pos_noise_std: float | None = None,

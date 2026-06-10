@@ -1833,6 +1833,14 @@ def main() -> None:
                         help="TCP 线速度硬限制 (m/s), 默认从配置文件读取, 0=不限速")
     parser.add_argument("--terminal-exempt-steps", type=int, default=0,
                         help="终段 qdot/TCP 豁免步数 (0=全程硬限), v6 默认=0")
+    parser.add_argument("--obs-freq", type=float, default=0,
+                        help="观测频率 Hz（0=无门控，200=每步观测）")
+    parser.add_argument("--obs-noise-pos", type=float, default=0,
+                        help="观测门控位置噪声 std (m)")
+    parser.add_argument("--obs-noise-vel", type=float, default=0,
+                        help="观测门控速度噪声 std (m/s)")
+    parser.add_argument("--obs-use-kf", action="store_true",
+                        help="观测门控启用 KF 滤波")
     args = parser.parse_args()
 
     # 推导消融模式：--ablation 优先，否则从旧 flag 映射
@@ -2667,9 +2675,33 @@ def main() -> None:
 
     async_mode = args.async_replan
 
+    # 观测门控初始化（exp9: 低频观测实验）
+    obs_gate = None
+    if args.obs_freq > 0:
+        from src.perception.ball_obs_gate import BallObservationGate
+        from src.perception.ball_estimator import BallEstimator as _BE
+        _obs_kf = None
+        if args.obs_use_kf:
+            _obs_kf = _BE(dt=dt, pos_noise_std=args.obs_noise_pos, vel_noise_std=args.obs_noise_vel)
+        obs_gate = BallObservationGate(
+            args.obs_freq, dt,
+            noise_pos=args.obs_noise_pos, noise_vel=args.obs_noise_vel,
+            kf=_obs_kf, rng=rng,
+        )
+        logger.info(f"[obs_gate] freq={args.obs_freq}Hz interval={obs_gate.obs_interval} "
+                    f"noise=({args.obs_noise_pos},{args.obs_noise_vel}) kf={args.obs_use_kf}")
+
+    def _get_ball_state_gated(step: int):
+        """带门控的球状态读取。"""
+        if obs_gate is not None:
+            true_pos = np.array(env.data.qpos[env.BALL_QPOS_START:env.BALL_QPOS_START + 3])
+            true_vel = np.array(env.data.qvel[env.BALL_QVEL_START:env.BALL_QVEL_START + 3])
+            return obs_gate.get_state(step, true_pos, true_vel)
+        return env.get_ball_state()
+
     # 首次规划同步完成（离线阶段）
     t_first_start = time.perf_counter()
-    ball_pos_init, ball_vel_init = env.get_ball_state()
+    ball_pos_init, ball_vel_init = _get_ball_state_gated(0)
     first_request = PlanRequest(
         x_current=x_current.copy(),
         ball_pos=ball_pos_init,
@@ -2745,7 +2777,7 @@ def main() -> None:
                 ball_pos_at_hit = ball_pos if 'ball_pos' in dir() else env.get_ball_pos().copy()
             logger.info(f"步 {step}: MPC 阶段结束，强制开始随挥 ({follow_through_steps} 步)")
 
-        ball_pos, ball_vel = env.get_ball_state()
+        ball_pos, ball_vel = _get_ball_state_gated(step)
         env.update_kinematics()
 
         # 记录 tube 诊断数据
