@@ -25,3 +25,5 @@
 | 2026-06-06 | [V9 消融分析](../v9_ablation_analysis.md) | 7 | TCP≤1.8+扰动 | 45-100% | Tube+Softmin协同：无扰动100%，扰动57%；随挥无独立贡献 |
 | 2026-06-07 | [V9 消融（解耦）](../v9_ablation_analysis_decoupled.md) | 7 | TCP≤1.8+扰动 | 45-94% | Softmin 是主要贡献者（94%→86%），Tube 仅+2pp，随挥无效果 |
 | 2026-06-07 | [exp8 KF恢复](2026-06-07_exp8_estimator_recovery.md) | 6-15 | 豁免+噪声+KF | 0-81% | KF lo噪声恢复+12pp（17%）；off性能税-20pp；anis恢复意外好 |
+| 2026-06-09 | [exp7 v4 preprocessor重跑](2026-06-09_exp7_noise_tube_ablation_v4.md) | 6-15 | 豁免+噪声 | 0-94% | off与v1完全一致(72.2%/81.4%)；lo从1.2%升至4.9%；preprocessor架构验证通过 |
+| 2026-06-10 | [exp8 v2 KF恢复](2026-06-10_exp8_estimator_recovery_v2.md) | 6-15 | 豁免+噪声+KF | 0-94% | off性能税0pp(已消除)；lo KF负恢复-5pp；mid/hi/anis无显著恢复 |

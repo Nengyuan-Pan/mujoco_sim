@@ -9,12 +9,13 @@ permission:
   edit: allow
   glob: allow
   grep: allow
+  list: allow
   bash:
-    "python scripts/exp/run_*": allow
-    "python scripts/extract/extract_*": allow
-    "ls *": allow
-    "mkdir *": allow
-    "*": ask
+    "git push *": deny
+    "git reset --hard *": deny
+    "git clean *": deny
+    "rm -rf / *": deny
+    "*": allow
   task: deny
   webfetch: deny
   websearch: deny
@@ -27,7 +28,7 @@ permission:
 你的职责是根据主 agent 提供的实验参数，完成以下三个步骤：
 
 1. **搭建**：创建数据目录、编写 monkey-patch 包装脚本、批量运行器、提取脚本
-2. **执行**：运行批量运行器，等待全部完成
+2. **执行**：通过 tmux 后台启动批量运行器
 3. **提取**：运行提取脚本，生成 `results.csv`
 
 **你不负责**：实验设计（主 agent 决定参数）、实验记录撰写（主 agent 生成记录文档）。
@@ -48,6 +49,19 @@ permission:
 
 ---
 
+## ⛔ 强制规则（违反即失败）
+
+1. **绝不前台运行批量实验**。所有 `run_*_batch.py` 必须通过 tmux 后台启动（第 7 节）。
+   前台运行会导致 subagent 超时（120s 限制 vs 3h+ 运行时间）。
+2. **绝不使用 `conda activate`**。直接用 `python` 或 `$(which python)`，
+   当前环境已激活。批量运行器已内置 `PYTHON_EXE = str(Path(sys.executable))`。
+3. **启动前必须环境预检**：运行 `python -c "import mujoco; print(mujoco.__version__)"`。
+   失败则立即报告，不继续。
+4. **启动前必须检查断点续传**：运行 `ls <RAW_DIR>/*.log 2>/dev/null | wc -l`，
+   报告已有 runs 数。若 >0，在返回信息中注明。
+
+---
+
 ## 第 1 节：工作流
 
 ```
@@ -56,8 +70,8 @@ permission:
   → 验证包装脚本 scripts/exp/_run_expN_<name>.py 已存在（由主 Agent 提供）
   → 编写批量运行器 scripts/exp/run_expN_<name>_batch.py
   → 编写提取脚本 scripts/extract/extract_expN_<name>_results.py
-  → 后台启动批量运行器（见第 7 节）
-  → 立即返回启动确认信息（PID + 检查命令）
+  → tmux 后台启动批量运行器（见第 7 节）
+  → 立即返回启动确认信息（tmux session 名 + 检查命令）
 ```
 
 每步完成后检查输出是否正确，出错时停止并报告错误。
@@ -66,7 +80,15 @@ permission:
 
 ## 第 2 节：模板路径表
 
-创建新实验脚本时，必须先读取对应模板文件，然后基于模板修改。
+### 条件分支
+
+**如果主 Agent prompt 中指定了 `provided_scripts` 参数**（即包装脚本、批量运行器、
+提取脚本已由主 Agent 创建），则**跳过本节和第 4 节**，直接进入第 7 节后台执行。
+你只需要验证这些文件存在即可（`ls <path>`），不需要读取或修改它们。
+
+**否则**（主 Agent 要求你从头搭建），按下方模板路径表操作，参考第 4 节编写脚本。
+
+### 模板路径表（仅在需要搭建时使用）
 
 | 用途 | 模板文件路径 |
 |------|-------------|
@@ -107,6 +129,7 @@ permission:
 
 | 参数 | 条件 | 说明 |
 |------|------|------|
+| `provided_scripts` | 主 Agent 已创建脚本 | 字典：`{"wrapper": "scripts/exp/...", "batch": "scripts/exp/...", "extract": "scripts/extract/..."}`。存在时跳过第 2、4 节 |
 | `custom_constraints` | `constraint_type == "custom"` | 自定义约束参数字典 |
 
 ### `custom_constraints` 字段说明
@@ -122,6 +145,8 @@ permission:
 ---
 
 ## 第 4 节：脚本编写规则
+
+> **跳过条件**：若 `provided_scripts` 参数存在，跳过本节。
 
 ### 4.1 包装脚本（`_run_expN_<name>.py`）
 
@@ -339,91 +364,86 @@ total_runs: <len(speeds) * len(tube_modes) * seeds>
 | 8 | CSV 列名不匹配 | 不同提取脚本列名不同 | 用固定 `fieldnames` + `extrasaction="ignore"` |
 | 9 | 单次运行超时 | 卡死或极慢球速 | `timeout=180` (秒)，超时记为失败 |
 | 10 | 实时脚本无 `__RESULT__` | 实时脚本输出格式不同 | 如果 `script_type == "realtime_v5"`，提取脚本需匹配 `__RESULT__` JSON 行 |
+| 11 | conda activate 失败 | subagent 中 shell 非交互 | 直接用 `python`，不 `conda activate` |
+| 12 | 环境缺失依赖 | 首次运行未验证 | 启动前 `python -c "import mujoco"` 预检 |
+| 13 | tmux session 已存在 | 重跑同名实验 | 先 `tmux kill-session -t <ID> 2>/dev/null`，再创建 |
+| 14 | 断点续传静默跳过 | 重跑已有实验 | 启动前报告已有 log 数量，主 Agent 确认 |
 
 ---
 
 ## 第 6 节：输出格式
 
-所有实验默认后台执行（见第 7 节）。你的职责是**启动实验并立即返回状态信息**，
-而非等待结果。提取和数据分析留给主 Agent 后续处理。
+**所有实验一律通过 tmux 后台启动**，无论规模。
+你的职责是启动实验并立即返回状态信息，**不等待结果**。
+提取和数据分析留给主 Agent 后续处理。
 
-### 后台模式（默认，所有实验)
-
-```
-## 实验已后台启动
-
-**实验**: <experiment_id>
-**PID**: <pid>
-**日志**: /tmp/<experiment_id>_<timestamp>.log
-**数据目录**: `$EXPERIMENT_DATA_DIR/<experiment_id>/`
-
-**进度检查**:
-  test -f $EXPERIMENT_DATA_DIR/<experiment_id>/_.COMPLETE && echo DONE || echo RUNNING
-  ls $EXPERIMENT_DATA_DIR/<experiment_id>/raw/*.log | wc -l
-
-**完成后提取**:
-  python scripts/extract/extract_<name>_results.py
-```
-
-### 说明
-
-- 主 Agent 可能要求你前台运行小规模验证实验。此时你等待完成后返回完整结果。
-- 否则始终后台启动，返回 PID 和检查命令。
-
----
-
-## 第 7 节：后台执行模式
-
-所有批量实验通过 nohup 后台执行，你启动后立即返回，**不等待实验结果**。
-
-### 7.1 启动命令
-
-```bash
-nohup bash -c '
-  echo "START $(date)" > $EXPERIMENT_DATA_DIR/<EXPERIMENT_ID>/.progress;
-  python scripts/exp/run_<NAME>_batch.py --workers 4;
-  echo "EXTRACT $(date)" >> $EXPERIMENT_DATA_DIR/<EXPERIMENT_ID>/.progress;
-  python scripts/extract/extract_<NAME>_results.py;
-  echo "DONE $(date)" > $EXPERIMENT_DATA_DIR/<EXPERIMENT_ID>/_.COMPLETE
-' > /tmp/<EXPERIMENT_ID>_$(date +%Y%m%d_%H%M).log 2>&1 &
-echo $! > $EXPERIMENT_DATA_DIR/<EXPERIMENT_ID>/.batch_pid
-```
-
-其中 `<EXPERIMENT_ID>` 和 `<NAME>` 替换为实际值。
-
-### 7.2 标记文件约定
-
-| 文件 | 用途 |
-|------|------|
-| `<DATA_DIR>/.batch_pid` | 后台进程 PID |
-| `<DATA_DIR>/.progress` | 当前阶段文本（START → EXTRACT → DONE）|
-| `<DATA_DIR>/_.COMPLETE` | 完成标记（全部成功时写入）|
-
-### 7.3 返回格式
-
-启动命令执行成功后，立即向主 Agent 返回：
+### 返回格式
 
 ```
 ## 实验已后台启动
 
 **实验**: <experiment_id>
-**PID**: <pid>
-**日志**: /tmp/<experiment_id>_20260605_1430.log
+**tmux session**: <experiment_id>
 **数据目录**: `$EXPERIMENT_DATA_DIR/<experiment_id>/`
+**已有 runs**: <N>（断点续传可用 / 全新）
 
 **进度检查**:
   test -f $EXPERIMENT_DATA_DIR/<experiment_id>/_.COMPLETE && echo DONE || echo RUNNING
   cat $EXPERIMENT_DATA_DIR/<experiment_id>/.progress
   ls $EXPERIMENT_DATA_DIR/<experiment_id>/raw/*.log | wc -l
 
+**重新连接查看实时输出**:
+  tmux attach -t <experiment_id>
+
 **完成后提取**:
   python scripts/extract/extract_<name>_results.py
 ```
 
+---
+
+## 第 7 节：后台执行模式
+
+所有批量实验通过 **tmux** 后台执行，SSH 断开后实验继续运行。
+
+### 7.1 启动命令
+
+```bash
+# 清理可能的旧 session
+tmux kill-session -t <EXPERIMENT_ID> 2>/dev/null
+
+# 启动 tmux session
+tmux new-session -d -s <EXPERIMENT_ID> "bash -c '
+  echo \"START \$(date -Iseconds)\" > <DATA_DIR>/.progress
+  python scripts/exp/run_<NAME>_batch.py --workers <N>
+  echo \"EXTRACT \$(date -Iseconds)\" >> <DATA_DIR>/.progress
+  python scripts/extract/extract_<NAME>_results.py
+  echo \"DONE \$(date -Iseconds)\" > <DATA_DIR>/_.COMPLETE
+'"
+```
+
+其中：
+- `<EXPERIMENT_ID>`：实验编号（如 `exp8_estimator_recovery`），同时作为 tmux session 名
+- `<NAME>`：批量运行器文件名中的标识部分
+- `<N>`：并行 workers 数
+- `<DATA_DIR>`：`$EXPERIMENT_DATA_DIR/<experiment_id>/`
+
+### 7.2 标记文件约定
+
+| 文件 | 用途 |
+|------|------|
+| `<DATA_DIR>/.progress` | 当前阶段文本（`START` → `EXTRACT` → `DONE`）|
+| `<DATA_DIR>/_.COMPLETE` | 完成标记（全部成功时写入）|
+
+### 7.3 返回格式
+
+启动命令执行成功后，立即向主 Agent 返回（格式见第 6 节）。
+
 ### 7.4 注意事项
 
-- nohup 链式执行中任何一步失败，后续步骤不执行（bash `&&` 链）
-- 若 `_.COMPLETE` 存在但进程已死 → 全部成功，可安全读取 CSV
-- 若 `_.COMPLETE` 不存在且进程存活 → 仍在运行
-- 若 `_.COMPLETE` 不存在且进程已死 → 某步失败，检查日志文件
+- tmux session 中使用 `&&` 链接命令，任何一步失败后续不执行
+- 若 `_.COMPLETE` 存在 → 全部成功，可安全读取 CSV
+- 若 `_.COMPLETE` 不存在且 tmux session 存活 → 仍在运行
+  （`tmux has-session -t <ID> 2>/dev/null && echo RUNNING || echo DEAD`）
+- 若 `_.COMPLETE` 不存在且 session 已死 → 某步失败，用 `tmux attach` 检查或查看 `.progress`
 - 断点续传：批量运行器内置 `log_path.exists()` 跳过，中断后重跑安全
+- SSH 断开后 tmux session 不受影响，重连后 `tmux attach -t <ID>` 恢复
