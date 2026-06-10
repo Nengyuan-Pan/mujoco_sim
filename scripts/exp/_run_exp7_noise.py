@@ -1,122 +1,76 @@
-"""exp7 噪声注入包装脚本：monkey-patch RM65Env.get_ball_state。
+"""exp7 噪声注入包装脚本：preprocessor 回调 + __init__ monkey-patch。
 
 用法:
     python scripts/exp/_run_exp7_noise.py <ball-speed> <seed> <use_tube> <noise_mode>
 
 noise_mode: off | lo | mid | hi | anis
+
+数据流:
+    每 MPC 步: env.observe() → MuJoCo → preprocessor(加噪) → 缓存
+    规划内:     env.get_ball_state() → 返回缓存 (不推进)
 """
 
 import sys
 from pathlib import Path
 
-import numpy as np
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 ball_speed = sys.argv[1]
-seed = sys.argv[2]
+seed = int(sys.argv[2])
 use_tube = sys.argv[3]
 noise_mode = sys.argv[4]
 
 # ============================================================
-# 模块级噪声配置（per-subprocess 独立，不与主脚本交互）
+# 工厂函数：创建 preprocessor（复用 exp8 配置）
 # ============================================================
-_NOISE_RNG: np.random.Generator | None = None
-_NOISE_POS_STD: float = 0.0
-_NOISE_VEL_STD: float = 0.0
-_NOISE_POS_XYZ: tuple[float, float, float] | None = None
-_NOISE_VEL_XYZ: tuple[float, float, float] | None = None
+from scripts.exp._exp8_config import make_preprocessor          # noqa: E402
 
-if noise_mode != "off":
-    _NOISE_RNG = np.random.default_rng(int(seed) + 7000)
-    if noise_mode == "lo":
-        _NOISE_POS_STD = 0.02
-        _NOISE_VEL_STD = 0.2
-    elif noise_mode == "mid":
-        _NOISE_POS_STD = 0.05
-        _NOISE_VEL_STD = 0.5
-    elif noise_mode == "hi":
-        _NOISE_POS_STD = 0.10
-        _NOISE_VEL_STD = 1.0
-    elif noise_mode == "anis":
-        _NOISE_POS_XYZ = (0.03, 0.10, 0.03)
-        _NOISE_VEL_XYZ = (0.3, 1.0, 0.3)
+_preprocessor = make_preprocessor(noise_mode, seed)
 
 # ============================================================
-# Monkey-patch: 在 import 主模块前替换 RM65Env.get_ball_state
+# Monkey-patch: RM65Env.__init__ — 注入 preprocessor
 # ============================================================
-from src.sim.rm65_env import RM65Env                     # noqa: E402
-from src.utils.noise import add_observation_noise        # noqa: E402
+from src.sim.rm65_env import RM65Env                             # noqa: E402
 
-_orig_get_ball_state = RM65Env.get_ball_state
-
-
-def _noisy_get_ball_state(self) -> tuple[np.ndarray, np.ndarray]:
-    assert self._estimator is None, (
-        "噪声 monkey-patch 与 estimator 不兼容："
-        "噪声应作用于真值，而非滤波后的值。"
-        "请勿在噪声实验中启用 estimator_config。"
-    )
-    pos, vel = _orig_get_ball_state(self)
-    if _NOISE_RNG is not None:
-        pos, vel = add_observation_noise(
-            pos, vel, _NOISE_RNG,
-            pos_std=_NOISE_POS_STD,
-            vel_std=_NOISE_VEL_STD,
-            pos_std_xyz=_NOISE_POS_XYZ,
-            vel_std_xyz=_NOISE_VEL_XYZ,
-        )
-    return pos, vel
+_orig_init = RM65Env.__init__
 
 
-RM65Env.get_ball_state = _noisy_get_ball_state  # type: ignore[method-assign]
+def _patched_init(self, *args, **kwargs):
+    _orig_init(self, *args, **kwargs)
+    if _preprocessor is not None:
+        self._preprocessor = _preprocessor
+
+
+RM65Env.__init__ = _patched_init                                 # type: ignore[method-assign]
 
 # ============================================================
-# 补充 patch: get_ball_pos 和 get_ball_vel 也加噪声
-# refine_hit_point 内部用 get_ball_pos/vel 做 Tube 搜索，
-# 若不 patch，安全模块看到无噪轨迹，会反复用无噪轨迹的
-# 安全点覆盖噪声轨迹选出的 k_hit → k_hit 锁死不递减
+# Monkey-patch: step_from_state 缓存保留
+# observe() 通过 preprocessor 注入噪声到缓存，
+# step_from_state 会清除缓存导致后续 get_ball_state() 读无噪真值。
 # ============================================================
-_orig_get_ball_pos = RM65Env.get_ball_pos
-_orig_get_ball_vel = RM65Env.get_ball_vel
+_orig_step_from_state = RM65Env.step_from_state
 
 
-def _noisy_get_ball_pos(self):
-    pos = _orig_get_ball_pos(self)
-    if _NOISE_RNG is not None:
-        pos, _ = add_observation_noise(
-            pos, np.zeros(3), _NOISE_RNG,
-            pos_std=_NOISE_POS_STD, vel_std=0.0,
-            pos_std_xyz=_NOISE_POS_XYZ, vel_std_xyz=None,
-        )
-    return pos
+def _cache_preserving_step_from_state(self, x, u, **kwargs):
+    cache = self._cached_ball_state
+    result = _orig_step_from_state(self, x, u, **kwargs)
+    self._cached_ball_state = cache
+    return result
 
 
-def _noisy_get_ball_vel(self):
-    vel = _orig_get_ball_vel(self)
-    if _NOISE_RNG is not None:
-        _, vel = add_observation_noise(
-            np.zeros(3), vel, _NOISE_RNG,
-            pos_std=0.0, vel_std=_NOISE_VEL_STD,
-            pos_std_xyz=None, vel_std_xyz=_NOISE_VEL_XYZ,
-        )
-    return vel
-
-
-RM65Env.get_ball_pos = _noisy_get_ball_pos  # type: ignore[method-assign]
-RM65Env.get_ball_vel = _noisy_get_ball_vel  # type: ignore[method-assign]
+RM65Env.step_from_state = _cache_preserving_step_from_state      # type: ignore[method-assign]
 
 # ============================================================
 # Monkey-patch RobotLimits: 速度豁免（与 exp1 一致）
 # ============================================================
-from src.ilqt.robot_limits import RobotLimits            # noqa: E402
+from src.ilqt.robot_limits import RobotLimits                    # noqa: E402
 
 _orig_from_config = RobotLimits.from_config
 
 
 @classmethod
-def _speed_exempt(cls, config, dt, ctrlrange):           # noqa: N805
+def _speed_exempt(cls, config, dt, ctrlrange):                   # noqa: N805
     config = dict(config)
     config["forward_pass_margin"] = 3.0
     config["qdot_scale"] = 0.95
@@ -125,7 +79,7 @@ def _speed_exempt(cls, config, dt, ctrlrange):           # noqa: N805
     return _orig_from_config(config, dt, ctrlrange)
 
 
-RobotLimits.from_config = _speed_exempt                  # type: ignore[method-assign]
+RobotLimits.from_config = _speed_exempt                          # type: ignore[method-assign]
 
 # ============================================================
 # 构建 sys.argv 并调用主脚本
@@ -133,14 +87,14 @@ RobotLimits.from_config = _speed_exempt                  # type: ignore[method-a
 sys.argv = [
     "rm65_mpc_tube_constraint.py",
     "--serve-box",
-    "--ball-speed", ball_speed,
-    "--seed", seed,
+    "--ball-speed", str(ball_speed),
+    "--seed", str(seed),
     "--use_tube", use_tube,
     "--no-backswing",
     "--no-plot",
 ]
 
-import scripts.rm65_mpc_tube_constraint as main_mod       # noqa: E402
+import scripts.rm65_mpc_tube_constraint as main_mod               # noqa: E402
 
 # ============================================================
 # Monkey-patch: find_hitting_point_physics 缓存回退
