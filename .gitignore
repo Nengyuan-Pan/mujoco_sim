@@ -15,6 +15,7 @@ build/
 experiment_data/
 figures/
 paper/
+.codegraph/
 *.mp4
 *.avi
 

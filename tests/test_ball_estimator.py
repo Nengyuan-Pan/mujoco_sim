@@ -241,6 +241,62 @@ class TestRM65EnvIntegration:
         np.testing.assert_allclose(est.covariance, np.eye(6) * 100.0)
 
 
+class TestBallEstimatorZeroR:
+    """R=0 直通透传：off 组 KF 性能税归零的基础。"""
+
+    def test_zero_r_passthrough_returns_obs_unmodified(self) -> None:
+        """R=0 时 update() 返回观测原样，不被 predict 或 Kalman 修改。"""
+        est = BallEstimator(dt=0.005, pos_noise_std=0.0, vel_noise_std=0.0)
+        est.update(np.array([1.0, 2.0, 3.0]), np.array([-0.5, 1.5, -2.0]))
+        pos, vel = est.update(np.array([1.1, 2.2, 3.3]), np.array([-0.6, 1.6, -2.2]))
+        np.testing.assert_allclose(pos, [1.1, 2.2, 3.3], atol=1e-10)
+        np.testing.assert_allclose(vel, [-0.6, 1.6, -2.2], atol=1e-10)
+
+    def test_zero_r_state_set_to_observation(self) -> None:
+        """R=0 时内部状态 _x 直接设为观测值 [pos, vel]。"""
+        est = BallEstimator(dt=0.005, pos_noise_std=0.0, vel_noise_std=0.0)
+        est.update(np.array([10.0, 20.0, 30.0]), np.array([-5.0, 1.0, -2.0]))
+        np.testing.assert_allclose(
+            est._x, [10.0, 20.0, 30.0, -5.0, 1.0, -2.0], atol=1e-10
+        )
+
+    def test_zero_r_marks_initialized(self) -> None:
+        """从未初始化时 R=0 首次 update() 也会标记 _initialized=True。"""
+        est = BallEstimator(dt=0.005, pos_noise_std=0.0, vel_noise_std=0.0)
+        assert est._initialized is False
+        est.update(np.array([0.0, 0.0, 0.0]), np.array([0.0, 0.0, 0.0]))
+        assert est._initialized is True
+
+    def test_zero_r_no_predict_invoked_on_init(self) -> None:
+        """R=0 首次调用（未初始化）不走 predict → 无除以零风险。"""
+        est = BallEstimator(dt=0.005, pos_noise_std=0.0, vel_noise_std=0.0)
+        pos, vel = est.update(np.array([1.0, 2.0, 3.0]), np.array([0.1, 0.2, 0.3]))
+        np.testing.assert_allclose(pos, [1.0, 2.0, 3.0])
+        np.testing.assert_allclose(vel, [0.1, 0.2, 0.3])
+
+    def test_zero_r_handles_repeated_calls(self) -> None:
+        """R=0 时反复调用 update() 始终直通，不累积偏差。"""
+        est = BallEstimator(dt=0.005, pos_noise_std=0.0, vel_noise_std=0.0)
+        for i in range(20):
+            p_ref = np.array([float(i), float(i * 2), float(i * 3)])
+            v_ref = np.array([0.1 * i, -0.1 * i, 0.0])
+            p, v = est.update(p_ref, v_ref)
+            np.testing.assert_allclose(p, p_ref, atol=1e-10, err_msg=f"步 {i} pos 偏差")
+            np.testing.assert_allclose(v, v_ref, atol=1e-10, err_msg=f"步 {i} vel 偏差")
+
+    def test_zero_r_zero_q_no_singularity(self) -> None:
+        """R=0 + Q=0 也不触发矩阵奇异（inv(0)）。需要 ≥3 次调用触发。"""
+        est = BallEstimator(
+            dt=0.005, pos_noise_std=0.0, vel_noise_std=0.0,
+            process_noise_pos=0.0, process_noise_vel=0.0,
+        )
+        est.update(np.array([1.0, 2.0, 3.0]), np.array([0.1, 0.2, 0.3]))
+        est.update(np.array([1.1, 2.2, 3.3]), np.array([0.4, 0.5, 0.6]))
+        pos, vel = est.update(np.array([1.5, 2.5, 3.5]), np.array([0.7, 0.8, 0.9]))
+        np.testing.assert_allclose(pos, [1.5, 2.5, 3.5], atol=1e-10)
+        np.testing.assert_allclose(vel, [0.7, 0.8, 0.9], atol=1e-10)
+
+
 class TestBallEstimatorDynamicR:
     """BallEstimator 动态观测噪声参数。"""
 

@@ -11,7 +11,6 @@
 """
 
 import numpy as np
-import pytest
 from pathlib import Path
 
 from src.sim.rm65_env import RM65Env
@@ -306,3 +305,213 @@ class TestPipelineSmoke:
                 assert pos.shape == (3,)
                 assert vel.shape == (3,)
                 env.step(np.zeros(RM65Env.NU))
+
+
+# ================================================================
+# RM65Env preprocessor 回调注入测试
+# ================================================================
+
+
+class TestEnvPreprocessor:
+    """RM65Env preprocessor 回调注入：噪声外置的构造基础。"""
+
+    def test_init_stores_preprocessor(self) -> None:
+        """传入 preprocessor 后 env._preprocessor 指向它。"""
+        called_with: list = []
+
+        def fake_pre(pos, vel):
+            called_with.append((pos.copy(), vel.copy()))
+            return pos, vel
+
+        env = RM65Env(MODEL_PATH, dt=DT, preprocessor=fake_pre)
+        assert env._preprocessor is fake_pre
+        # 回调尚未被调用
+        assert len(called_with) == 0
+
+    def test_init_preprocessor_default_none(self) -> None:
+        """不传 preprocessor 时 _preprocessor is None (向后兼容)。"""
+        env = RM65Env(MODEL_PATH, dt=DT)
+        assert env._preprocessor is None
+
+    def test_preprocessor_receives_mujoco_state(self) -> None:
+        """回调接收的 pos/vel 是 MuJoCo 真值 (形状正确, 有限值)。"""
+        received_pos: np.ndarray | None = None
+        received_vel: np.ndarray | None = None
+
+        def capture_pre(pos, vel):
+            nonlocal received_pos, received_vel
+            received_pos = pos.copy()
+            received_vel = vel.copy()
+            return pos, vel
+
+        env = RM65Env(MODEL_PATH, dt=DT, preprocessor=capture_pre)
+        env.reset()
+        env._preprocessor(
+            env.data.qpos[RM65Env.BALL_QPOS_START: RM65Env.BALL_QPOS_START + 3].copy(),
+            env.data.qvel[RM65Env.BALL_QVEL_START: RM65Env.BALL_QVEL_START + 3].copy(),
+        )
+        assert received_pos is not None
+        assert received_vel is not None
+        assert received_pos.shape == (3,)
+        assert received_vel.shape == (3,)
+        assert np.all(np.isfinite(received_pos))
+        assert np.all(np.isfinite(received_vel))
+
+
+# ================================================================
+# RM65Env observe() 方法测试
+# ================================================================
+
+
+class TestEnvObserve:
+    """observe() 方法：单次推进处理管线 (MuJoCo → preprocessor → KF → 缓存)。"""
+
+    def test_observe_no_kf_returns_mujoco_state(self) -> None:
+        """无 KF 无 preprocessor: observe() 返回 MuJoCo 球位置和速度。"""
+        env = RM65Env(MODEL_PATH, dt=DT)
+        env.reset()
+        pos, vel = env.observe()
+        bq = RM65Env.BALL_QPOS_START
+        bv = RM65Env.BALL_QVEL_START
+        np.testing.assert_allclose(pos, env.data.qpos[bq:bq + 3], atol=1e-8)
+        np.testing.assert_allclose(vel, env.data.qvel[bv:bv + 3], atol=1e-8)
+
+    def test_observe_with_kf_advances_filter(self) -> None:
+        """有 KF: observe() 调用 estimator.update()，内部 _x 改变。"""
+        kf = BallEstimator(dt=DT, pos_noise_std=0.03, vel_noise_std=0.3)
+        env = RM65Env(MODEL_PATH, dt=DT, estimator=kf)
+        env.reset()
+        # 记录初始 KF 状态
+        x_before = kf._x.copy()
+        env.observe()
+        x_after = kf._x.copy()
+        # _x 应该已变化（滤波推进了）
+        assert not np.allclose(x_before, x_after, atol=1e-10)
+
+    def test_observe_preprocessor_called_before_kf(self) -> None:
+        """preprocessor 在 KF 之前调用，修改后的观测进入 KF。"""
+        kf = BallEstimator(dt=DT, pos_noise_std=0.001, vel_noise_std=0.01)
+
+        def add_bias_pre(pos, vel):
+            return pos + np.array([0.1, 0.0, 0.0]), vel
+
+        env = RM65Env(MODEL_PATH, dt=DT, estimator=kf, preprocessor=add_bias_pre)
+        env.reset()
+        pos, vel = env.observe()
+        # 由于 preprocessor 加了 0.1 的 X 偏置，KF 输出应该被偏置影响
+        bq = RM65Env.BALL_QPOS_START
+        raw_x = env.data.qpos[bq]
+        # KF 输出 X 应接近 raw + 0.1（有小量滤波滞后）
+        assert abs(pos[0] - (raw_x + 0.1)) < 0.01
+
+    def test_observe_caches_for_get_ball_state(self) -> None:
+        """observe() 后 get_ball_state() 返回相同缓存值。"""
+        kf = BallEstimator(dt=DT, pos_noise_std=0.03, vel_noise_std=0.3)
+        env = RM65Env(MODEL_PATH, dt=DT, estimator=kf)
+        env.reset()
+        pos1, vel1 = env.observe()
+        pos2, vel2 = env.get_ball_state()
+        np.testing.assert_allclose(pos1, pos2, atol=1e-10)
+        np.testing.assert_allclose(vel1, vel2, atol=1e-10)
+
+
+# ================================================================
+# 向后兼容性测试
+# ================================================================
+
+
+class TestBackwardCompat:
+    """向后兼容：旧用法 (无 KF / 不调 observe) 行为不变。"""
+
+    def test_old_flow_no_kf_unchanged(self) -> None:
+        """无 KF: 旧 get_ball_state → step_full 链路数值不变。"""
+        env = RM65Env(MODEL_PATH, dt=DT)
+        env.reset()
+        # 旧用法: 直接调 get_ball_state (不调 observe)
+        pos, vel = env.get_ball_state()
+        assert pos.shape == (3,)
+        assert vel.shape == (3,)
+        np.testing.assert_allclose(pos, [5.0, 0.0, 2.0], atol=0.01)
+        x, pos2, vel2 = env.step_full(np.zeros(RM65Env.NU))
+        assert pos2.shape == (3,)
+        assert vel2.shape == (3,)
+
+    def test_observe_then_get_ball_state_consistency(self) -> None:
+        """同一帧内 observe() → get_ball_state() 返回相同值。"""
+        env = RM65Env(MODEL_PATH, dt=DT)
+        env.reset()
+        p1, v1 = env.observe()
+        p2, v2 = env.get_ball_state()
+        np.testing.assert_allclose(p1, p2, atol=1e-10)
+        np.testing.assert_allclose(v1, v2, atol=1e-10)
+
+    def test_old_estimator_config_still_works(self) -> None:
+        """旧 estimator_config 方式仍可用（get_ball_state 自动推进 KF）。"""
+        env = RM65Env(
+            MODEL_PATH, dt=DT,
+            estimator_config={"pos_noise_std": 0.001, "vel_noise_std": 0.01},
+        )
+        env.reset()
+        pos, vel = env.get_ball_state()
+        assert pos.shape == (3,)
+        assert vel.shape == (3,)
+        assert not np.any(np.isnan(pos))
+        # 多步调用不崩溃
+        for _ in range(5):
+            env.step(np.zeros(RM65Env.NU))
+            pos, vel = env.get_ball_state()
+            assert not np.any(np.isnan(pos))
+
+
+# ================================================================
+# exp8 工厂函数测试 (无 MuJoCo, 纯函数)
+# ================================================================
+
+
+class TestExp8Factory:
+    """exp8 wrapper 工厂函数：替代 monkey-patch 的纯函数。
+
+    测试 _exp8_config.py 中的 make_preprocessor / make_estimator。
+    """
+
+    def test_make_preprocessor_off_returns_none(self) -> None:
+        """off 噪声模式: 返回 None (无预处理)。"""
+        from scripts.exp._exp8_config import make_preprocessor
+        pre = make_preprocessor("off", 42)
+        assert pre is None
+
+    def test_make_preprocessor_lo_returns_callable(self) -> None:
+        """lo 噪声模式: 返回可调用对象。"""
+        from scripts.exp._exp8_config import make_preprocessor
+        pre = make_preprocessor("lo", 42)
+        assert pre is not None
+        assert callable(pre)
+
+    def test_make_preprocessor_applies_noise(self) -> None:
+        """工厂闭包中 add_observation_noise 产生确切偏移。"""
+        from scripts.exp._exp8_config import make_preprocessor
+        pre = make_preprocessor("mid", 42)
+        rng = np.random.default_rng(42 + 7000)
+        expected_p, expected_v = add_observation_noise(
+            np.array([1.0, 2.0, 3.0]), np.array([0.5, 1.5, -2.0]),
+            rng, pos_std=0.05, vel_std=0.5,
+        )
+        actual_p, actual_v = pre(
+            np.array([1.0, 2.0, 3.0]), np.array([0.5, 1.5, -2.0]),
+        )
+        np.testing.assert_allclose(actual_p, expected_p, rtol=1e-6)
+        np.testing.assert_allclose(actual_v, expected_v, rtol=1e-6)
+
+    def test_make_estimator_off_has_r_zero(self) -> None:
+        """off 组 KF 的 R 矩阵为零 (直通透传)。"""
+        from scripts.exp._exp8_config import make_estimator
+        kf = make_estimator("off")
+        assert kf is not None
+        assert np.allclose(kf._R, 0)
+
+    def test_make_estimator_lo_has_r_nonzero(self) -> None:
+        """噪声组 KF 的 R 矩阵非零（实际滤波）。"""
+        from scripts.exp._exp8_config import make_estimator
+        kf = make_estimator("lo")
+        assert kf is not None
+        assert not np.allclose(kf._R, 0)

@@ -1,7 +1,6 @@
 """噪声注入功能测试。"""
 
 import numpy as np
-import pytest
 
 from src.utils.noise import add_observation_noise, add_torque_noise, randomize_init_q
 

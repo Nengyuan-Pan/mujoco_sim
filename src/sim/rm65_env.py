@@ -10,6 +10,7 @@
 import numpy as np
 import mujoco
 from pathlib import Path
+from typing import Callable
 
 from src.utils.mujoco_loader import load_mujoco_model
 from src.perception.ball_estimator import BallEstimator
@@ -33,6 +34,7 @@ class RM65Env:
         dt: float | None = None,
         estimator: BallEstimator | None = None,
         estimator_config: dict | None = None,
+        preprocessor: Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]] | None = None,
     ) -> None:
         """初始化 RM-65 MuJoCo 环境。
 
@@ -41,6 +43,8 @@ class RM65Env:
             dt: 可选的覆盖时间步长。
             estimator: 预配置的 BallEstimator 实例，None 或不存在时不滤波。
             estimator_config: BallEstimator 参数字典，estimator 非 None 时忽略。
+            preprocessor: 观测预处理回调 (pos, vel) -> (pos, vel)，
+                          在 KF 之前调用，用于噪声注入等外部处理。
         """
         self.model = load_mujoco_model(model_path)
         if dt is not None:
@@ -58,11 +62,32 @@ class RM65Env:
         )
 
         self.init_q_left: np.ndarray = np.zeros(self.LEFT_ARM_NQ)
+        self._preprocessor = preprocessor
         self._estimator = None
         if estimator is not None:
             self._estimator = estimator
         elif estimator_config is not None:
             self._estimator = BallEstimator(self.dt, **estimator_config)
+        self._cached_ball_state: tuple[np.ndarray, np.ndarray] | None = None
+
+    def observe(self) -> tuple[np.ndarray, np.ndarray]:
+        """推进观测处理管线：MuJoCo → preprocessor → KF → 缓存。
+
+        每 MPC 步仅应调用一次，后续用 get_ball_state() 读缓存。
+
+        Returns:
+            (pos, vel) 处理后的球状态（滤波值，或无 KF 时为 MuJoCo 真值）。
+        """
+        bq = self.BALL_QPOS_START
+        bv = self.BALL_QVEL_START
+        pos = self.data.qpos[bq: bq + 3].copy()
+        vel = self.data.qvel[bv: bv + 3].copy()
+        if self._preprocessor is not None:
+            pos, vel = self._preprocessor(pos, vel)
+        if self._estimator is not None:
+            pos, vel = self._estimator.update(pos, vel)
+        self._cached_ball_state = (pos, vel)
+        return pos, vel
 
     def reset(self, q0: np.ndarray | None = None) -> np.ndarray:
         """重置仿真状态。
@@ -81,6 +106,7 @@ class RM65Env:
         mujoco.mj_forward(self.model, self.data)
         if self._estimator is not None:
             self._estimator.reset()
+        self._cached_ball_state = None
         return self.get_arm_state()
 
     def get_arm_state(self) -> np.ndarray:
@@ -131,6 +157,7 @@ class RM65Env:
         l_tau = np.clip(l_tau, l_ctrl_range[:, 0], l_ctrl_range[:, 1])
         self.data.ctrl[self.NU: self.NU + self.LEFT_ARM_NQ] = l_tau
         mujoco.mj_step(self.model, self.data)
+        self._cached_ball_state = None  # 球物理状态已变，缓存作废
         self._handle_ball_bounce()
         return self.get_arm_state()
 
@@ -147,10 +174,23 @@ class RM65Env:
             self.model.geom_contype[:ball_geom_start] = 0
             self.model.geom_conaffinity[:ball_geom_start] = 0
 
-    def step_from_state(self, x: np.ndarray, u: np.ndarray) -> np.ndarray:
-        """从指定右臂状态出发，施加控制并前进一步。"""
+    def step_from_state(self, x: np.ndarray, u: np.ndarray,
+                        preserve_cache: bool = False) -> np.ndarray:
+        """从指定右臂状态出发，施加控制并前进一步。
+
+        Args:
+            x: 右臂状态 [q, qdot]，形状 (12,)。
+            u: 控制力矩，形状 (NU,)。
+            preserve_cache: 为 True 时保留球状态缓存，
+                用于 trial step 场景（X 平面墙 / safety filter），
+                调用端会在之后恢复球状态，缓存应随之保留。
+        """
+        cache = self._cached_ball_state if preserve_cache else None
         self.set_arm_state(x)
-        return self.step(u)
+        result = self.step(u)
+        if preserve_cache:
+            self._cached_ball_state = cache
+        return result
 
     def _handle_ball_bounce(self) -> None:
         """检测球是否触碰地面并应用解析弹跳。"""
@@ -289,45 +329,38 @@ class RM65Env:
             self.data.qvel[bv + 3:bv + 6] = vel[3:6]
 
     def get_ball_state(self) -> tuple[np.ndarray, np.ndarray]:
-        """获取球的当前位置和速度（如有 estimator 则返回滤波值）。"""
+        """获取球的当前位置和速度（如有缓存则返回缓存值，否则读 MuJoCo）。"""
+        if self._cached_ball_state is not None:
+            return self._cached_ball_state
         bq = self.BALL_QPOS_START
         bv = self.BALL_QVEL_START
         pos = self.data.qpos[bq: bq + 3].copy()
         vel = self.data.qvel[bv: bv + 3].copy()
         if self._estimator is not None:
             pos, vel = self._estimator.update(pos, vel)
+            self._cached_ball_state = (pos, vel)
         return pos, vel
 
     def get_ball_pos(self) -> np.ndarray:
-        """获取球的当前世界坐标位置（如有 estimator 则返回滤波值）。
+        """获取球的当前世界坐标位置（如有缓存则优先返回缓存滤波值）。
 
-        注意：若启用 estimator，本方法返回上次 update() 的缓存值，
-        不会驱动滤波器前进一步。主循环应使用 get_ball_state() 以确保
-        每帧滤波推进。
+        不会驱动滤波器前进一步。主循环应使用 observe() 以确保每帧滤波推进。
         """
-        if self._estimator is not None:
-            if not self._estimator.initialized:
-                raise RuntimeError(
-                    "estimator 未初始化，请先调用 get_ball_state() "
-                    "或 estimator.update()"
-                )
+        if self._cached_ball_state is not None:
+            return self._cached_ball_state[0]
+        if self._estimator is not None and self._estimator.initialized:
             return self._estimator.state[0]
         bq = self.BALL_QPOS_START
         return self.data.qpos[bq: bq + 3].copy()
 
     def get_ball_vel(self) -> np.ndarray:
-        """获取球的当前线速度（如有 estimator 则返回滤波值）。
+        """获取球的当前线速度（如有缓存则优先返回缓存滤波值）。
 
-        注意：若启用 estimator，本方法返回上次 update() 的缓存值，
-        不会驱动滤波器前进一步。主循环应使用 get_ball_state() 以确保
-        每帧滤波推进。
+        不会驱动滤波器前进一步。主循环应使用 observe() 以确保每帧滤波推进。
         """
-        if self._estimator is not None:
-            if not self._estimator.initialized:
-                raise RuntimeError(
-                    "estimator 未初始化，请先调用 get_ball_state() "
-                    "或 estimator.update()"
-                )
+        if self._cached_ball_state is not None:
+            return self._cached_ball_state[1]
+        if self._estimator is not None and self._estimator.initialized:
             return self._estimator.state[1]
         bv = self.BALL_QVEL_START
         return self.data.qvel[bv: bv + 3].copy()
@@ -342,9 +375,12 @@ class RM65Env:
         return self.model.opt.timestep
 
     def step_full(self, u: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """施加控制力矩并前进一步，返回右臂状态和球状态。"""
+        """施加控制力矩并前进一步，返回右臂状态和球状态。
+
+        调用 step() 后自动推进观测管线，保持缓存与物理状态同步。
+        """
         x_arm = self.step(u)
-        ball_pos, ball_vel = self.get_ball_state()
+        ball_pos, ball_vel = self.observe()
         return x_arm, ball_pos, ball_vel
 
     def predict_ball_trajectory(

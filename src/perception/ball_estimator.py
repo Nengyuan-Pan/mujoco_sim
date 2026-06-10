@@ -118,6 +118,13 @@ class BallEstimator:
         Returns:
             (filtered_pos, filtered_vel) 滤波后的球位置和速度。
         """
+        # R=0 直通透传：观测无噪时不运行预测/校正循环
+        if np.allclose(self._R, 0):
+            self._x = np.hstack([z_pos, z_vel])
+            self._initialized = True
+            self._last_update_time = time.perf_counter()
+            return z_pos.copy(), z_vel.copy()
+
         if not self._initialized:
             self._x = np.hstack([z_pos, z_vel])
             self._initialized = True
