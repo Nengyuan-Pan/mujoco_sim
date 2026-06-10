@@ -27,3 +27,4 @@
 | 2026-06-07 | [exp8 KF恢复](2026-06-07_exp8_estimator_recovery.md) | 6-15 | 豁免+噪声+KF | 0-81% | KF lo噪声恢复+12pp（17%）；off性能税-20pp；anis恢复意外好 |
 | 2026-06-09 | [exp7 v4 preprocessor重跑](2026-06-09_exp7_noise_tube_ablation_v4.md) | 6-15 | 豁免+噪声 | 0-94% | off与v1完全一致(72.2%/81.4%)；lo从1.2%升至4.9%；preprocessor架构验证通过 |
 | 2026-06-10 | [exp8 v2 KF恢复](2026-06-10_exp8_estimator_recovery_v2.md) | 6-15 | 豁免+噪声+KF | 0-94% | off性能税0pp(已消除)；lo KF负恢复-5pp；mid/hi/anis无显著恢复 |
+| 2026-06-10 | [exp9 观测频率鲁棒性](2026-06-10_exp9_obs_freq_robustness.md) | 6-15 | 豁免+观测门控+噪声+KF | 0-94% | off频率退化0pp(200→10Hz)；lo KF恢复+9.4pp→+1.0pp随频率衰减；低频KF负恢复 |
