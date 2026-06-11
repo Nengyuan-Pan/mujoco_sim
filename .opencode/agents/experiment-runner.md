@@ -1,7 +1,7 @@
 ---
 description: 执行 MPC+iLQR+Tube 网球击打实验（搭建脚本→批量运行→提取CSV），支持离线和实时 v5 两种模式
 mode: subagent
-model: glm-5.1
+model: glm-5-turbo
 temperature: 0.0
 hidden: false
 permission:
