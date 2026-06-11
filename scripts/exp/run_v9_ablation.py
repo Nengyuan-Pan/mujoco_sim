@@ -3,8 +3,8 @@
 16 组 × 50 seeds = 800 runs, 4 workers 并行。
 随机扰动: 时间 ±50~100ms, 空间 ±3~8cm, 每次运行随机采样。
 用法:
-    python scripts/run_v9_ablation.py              # 全部 16 组
-    python scripts/run_v9_ablation.py 0 1          # 仅运行指定组
+    python scripts/exp/run_v9_ablation.py              # 全部 16 组
+    python scripts/exp/run_v9_ablation.py 0 1          # 仅运行指定组
 """
 import subprocess
 import sys
@@ -15,8 +15,9 @@ import time
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-SCRIPT = Path(__file__).parent / "rm65_mpc_v9.py"
-RESULTS_DIR = Path(__file__).resolve().parent.parent / "results" / "v9_ablation"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+SCRIPT = PROJECT_ROOT / "scripts" / "rm65_mpc_v9.py"
+RESULTS_DIR = PROJECT_ROOT / "results" / "v9_ablation"
 SEEDS = list(range(50))
 
 BASE_CMD = [

@@ -1,8 +1,15 @@
-"""V10 消融实验批量脚本。
+"""球晚到实验: 随挥触发策略消融。
 
-6 组实验，每组 50 seeds，4 workers 并行。
+测试场景: 球比计划晚到 +50~100ms, 空间偏移 +3~8cm。
+对比 3 种随挥策略 × 2 条件 (nominal / late) = 6 组。
+
+随挥策略:
+  - no_follow: 无随挥 (baseline)
+  - planned: 到达计划击打时刻即触发随挥 PD (当前默认)
+  - contact: 仅在球拍击球后触发随挥 PD, 球晚到时 MPC 继续追踪
+
 用法:
-    python scripts/run_v10_ablation.py 0 1 2 3 4 5
+    python scripts/exp/run_v9_late_ball.py
 """
 import subprocess
 import sys
@@ -13,36 +20,45 @@ import time
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-SCRIPT = Path(__file__).parent / "rm65_mpc_v10.py"
-RESULTS_DIR = Path(__file__).resolve().parent.parent / "results" / "v10_ablation"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+SCRIPT = PROJECT_ROOT / "scripts" / "rm65_mpc_v9.py"
+RESULTS_DIR = PROJECT_ROOT / "results" / "v9_late_ball"
 SEEDS = list(range(50))
 
 BASE_CMD = [
     sys.executable, str(SCRIPT),
     "--serve-box", "--ball-speed", "7",
-    "--hit-shift", "0.40",
+    "--hit-shift", "0.20",
     "--near-iters", "20",
     "--no-plot",
+    "--ablation", "full",
 ]
 
-PERTURB_ARGS = [
-    "--time-perturb-ms", "300",
-    "--space-perturb-m", "0.15",
+LATE_PERTURB = [
+    "--random-perturb",
+    "--time-perturb-ms", "100",
+    "--time-perturb-min-ms", "50",
+    "--space-perturb-m", "0.08",
+    "--space-perturb-min-m", "0.03",
+    "--perturb-sign", "positive",
     "--perturb-alpha-min", "1.0",
 ]
 
 EXPERIMENTS = [
-    ("v10_full_nominal", []),
-    ("v10_full_perturb", PERTURB_ARGS),
-    ("v10_notube_nominal", ["--no-tube", "--no-softmin"]),
-    ("v10_notube_perturb", ["--no-tube", "--no-softmin"] + PERTURB_ARGS),
-    ("v10_nosoftmin_nominal", ["--no-softmin"]),
-    ("v10_nosoftmin_perturb", ["--no-softmin"] + PERTURB_ARGS),
+    ("no_follow_nominal", ["--no-follow-through"]),
+    ("planned_nominal", ["--follow-trigger", "planned"]),
+    ("contact_nominal", ["--follow-trigger", "contact"]),
+    ("no_follow_late", ["--no-follow-through"] + LATE_PERTURB),
+    ("planned_late", ["--follow-trigger", "planned"] + LATE_PERTURB),
+    ("contact_late", ["--follow-trigger", "contact"] + LATE_PERTURB),
 ]
 
 RESULT_RE = re.compile(
-    r"pos_error=([\d.]+).*?min_dist=([\d.]+).*?"
-    r"max_tcp=([\d.]+).*?max_qdot=([\d.]+).*?"
+    r"__RESULT__:\s+"
+    r"pos_error=([\d.]+).*?"
+    r"min_dist=([\d.]+).*?"
+    r"max_tcp=([\d.]+).*?"
+    r"max_qdot=([\d.]+).*?"
     r"hit_type=(\w+).*?"
     r"hit_time_error_ms=([-\d.]+).*?"
     r"v_racket_at_hit=([\d.]+)",
@@ -106,8 +122,9 @@ def run_experiment(name: str, extra_args: list[str]):
 
     hit = sum(1 for r in rows if r["hit_type"] in ("active", "passive"))
     act = sum(1 for r in rows if r["hit_type"] == "active")
-    avg_pos = sum(r["pos_error"] for r in rows if r["hit_type"] != "error") / len(rows) * 100
-    avg_v = sum(r["v_racket"] for r in rows if r["hit_type"] != "error") / len(rows)
+    hit_rows = [r for r in rows if r["hit_type"] in ("active", "passive")]
+    avg_pos = sum(r["pos_error"] for r in hit_rows) / max(len(hit_rows), 1) * 100
+    avg_v = sum(r["v_racket"] for r in hit_rows) / max(len(hit_rows), 1)
     elapsed = time.time() - t0
     print(f"  => hit={hit}/50 ({hit*2}%) active={act}/50 ({act*2}%) "
           f"pos={avg_pos:.1f}cm v={avg_v:.2f}m/s [{elapsed:.0f}s]")
@@ -124,7 +141,29 @@ def main():
         name, extra = EXPERIMENTS[idx]
         run_experiment(name, extra)
 
-    print(f"\n全部完成！总耗时 {time.time()-t_start:.0f}s")
+    print(f"\n全部完成！总耗时 {(time.time()-t_start)/60:.1f}min")
+
+    print(f"\n{'='*70}")
+    print(f"  球晚到实验结果汇总")
+    print(f"{'='*70}")
+    print(f"{'策略':<20} {'Nominal命中':>12} {'Late命中':>12} {'Nominal主动':>12} {'Late主动':>12}")
+    print("-" * 70)
+    strategies = ["no_follow", "planned", "contact"]
+    for s in strategies:
+        nom_path = RESULTS_DIR / f"{s}_nominal.csv"
+        late_path = RESULTS_DIR / f"{s}_late.csv"
+        nom_hit = nom_act = late_hit = late_act = 0
+        if nom_path.exists():
+            with open(nom_path, encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+                nom_hit = sum(1 for r in rows if r["hit_type"] in ("active", "passive"))
+                nom_act = sum(1 for r in rows if r["hit_type"] == "active")
+        if late_path.exists():
+            with open(late_path, encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+                late_hit = sum(1 for r in rows if r["hit_type"] in ("active", "passive"))
+                late_act = sum(1 for r in rows if r["hit_type"] == "active")
+        print(f"{s:<20} {nom_hit:>10}/50 {late_hit:>10}/50 {nom_act:>10}/50 {late_act:>10}/50")
 
 
 if __name__ == "__main__":

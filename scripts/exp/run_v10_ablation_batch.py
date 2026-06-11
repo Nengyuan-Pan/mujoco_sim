@@ -3,8 +3,8 @@
 消融维度：tube(开/关) × softmin(开/关) × perturb(0%/10%) × ball_speed × seed
 
 用法:
-    python scripts/run_v10_ablation_batch.py
-    python scripts/run_v10_ablation_batch.py --workers 4
+    python scripts/exp/run_v10_ablation_batch.py
+    python scripts/exp/run_v10_ablation_batch.py --workers 4
 """
 import argparse
 import os
@@ -14,7 +14,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 RAW_DIR = PROJECT_ROOT / "experiment_data" / "v10_ablation" / "raw"
 SCRIPT = PROJECT_ROOT / "scripts" / "rm65_mpc_v10.py"
 PYTHON_EXE = str(Path(sys.executable))

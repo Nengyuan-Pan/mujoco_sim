@@ -163,11 +163,11 @@ mujoco_sim/
 │   ├── rm65_mpc_v11.py                           # ★ V11 仿真主脚本（最新迭代：bug修复 + sigmoid 权重调度）
 │   ├── run_20hits_video.py                       # 连续 20 次击打视频生成脚本
 │   ├── sim/            # 独立仿真（v4/v5/v8v9变体/fast/ilqt/train）
-│   ├── exp/            # 实验设施 43 个（包装·批量·运行器）
-│   ├── extract/        # 结果提取 6 个（日志→CSV）
-│   ├── plot/           # 论文图表 12 个
+│   ├── exp/            # 实验设施 52 个（包装·批量·运行器）
+│   ├── extract/        # 结果提取 9 个（日志→CSV）
+│   ├── plot/           # 论文图表 14 个
 │   ├── tools/          # 独立工具 10 个（查看器·扫描·诊断·可视化）
-│   ├── test/           # 快速验证 9 个
+│   ├── test/           # 快速验证 10 个
 │   └── README.md       # 完整清单与说明
 ├── tests/
 │   ├── test_kinematics.py

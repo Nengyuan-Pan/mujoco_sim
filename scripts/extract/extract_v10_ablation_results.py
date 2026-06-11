@@ -3,14 +3,14 @@
 从 raw/ 日志中提取 __RESULT__ 行，输出 results.csv 和汇总统计。
 
 用法:
-    python scripts/extract_v10_ablation_results.py
+    python scripts/extract/extract_v10_ablation_results.py
 """
 import csv
 import re
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 RAW_DIR = PROJECT_ROOT / "experiment_data" / "v10_ablation" / "raw"
 OUT_CSV = PROJECT_ROOT / "experiment_data" / "v10_ablation" / "results.csv"
 OUT_RESULTS = PROJECT_ROOT / "results" / "v10_ablation"

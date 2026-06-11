@@ -318,7 +318,7 @@ def plot_summary_table(all_r, save_path):
 
 
 def main():
-    results_dir = Path(__file__).resolve().parent.parent / "results" / "v9_ablation"
+    results_dir = Path(__file__).resolve().parent.parent.parent / "results" / "v9_ablation"
 
     combos = [
         (False, False, False),

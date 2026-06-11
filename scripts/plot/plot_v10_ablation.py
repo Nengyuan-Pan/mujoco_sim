@@ -256,7 +256,7 @@ def plot_summary_table(results, save_path):
 
 
 def main():
-    results_dir = Path(__file__).resolve().parent.parent / "results" / "v10_ablation"
+    results_dir = Path(__file__).resolve().parent.parent.parent / "results" / "v10_ablation"
     if not results_dir.exists():
         print(f"Directory not found: {results_dir}")
         sys.exit(1)

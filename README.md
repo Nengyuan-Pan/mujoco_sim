@@ -45,7 +45,7 @@ python scripts/rm65_mpc_tube_constraint.py --serve-box --ball-speed 9 --no-plot
 python scripts/rm65_mpc_v11.py --serve-box --ball-speed 7 --viewer
 
 # V9 消融实验（Tube × Softmin × 随挥 2^3 因子设计）
-python scripts/run_v9_ablation.py --serve-box --ball-speed 7 --workers 4
+python scripts/exp/run_v9_ablation.py --serve-box --ball-speed 7 --workers 4
 
 # 离线批量实验（多进程并行）
 python scripts/exp/run_exp1_v3_batch.py --workers 4
