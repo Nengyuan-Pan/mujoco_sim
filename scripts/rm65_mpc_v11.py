@@ -29,7 +29,6 @@ import argparse
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import yaml
@@ -43,17 +42,13 @@ from src.tennis.ball import (
 )
 from src.tennis.hitting import (
     find_hitting_point_physics,
-    compute_desired_hit_velocity,
 )
 from src.ilqt.cost import HittingCost
 from src.ilqt.robot_limits import (
     RobotLimits,
-    check_step_feasibility,
     check_one_step_feasibility,
     compute_trajectory_metrics,
-    compute_tcp_speed_from_env,
     ExecutionMetrics,
-    strict_braking_check,
 )
 from src.ilqt.async_replanner import AsyncReplanner, PlanRequest, PlanResult
 try:
@@ -65,6 +60,11 @@ try:
     from src.cpp.solver_cpp import ILQTSolver
 except ImportError:
     from src.ilqt.solver import ILQTSolver
+from src.ilqt.jt_init import (
+    compute_jacobian_init_control_position,
+    generate_backswing_warm_start_position,
+    fix_joint5_control_trajectory_position,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -73,6 +73,89 @@ logging.basicConfig(
 # 抑制 robot_limits 的 DEBUG 级别日志（避免 qddot 每步检查泛滥）
 logging.getLogger("src.ilqt.robot_limits").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+
+
+# 力矩增益→位置增益的缩放因子
+# 力矩版 gain=50 对应力矩 ~50Nm，位置版 gain=0.5 对应弧度增量 ~0.5rad
+_GAIN_TORQUE_TO_POSITION = 0.01
+
+
+def _jt_init_dispatch(
+    env: RM65Env,
+    x0: np.ndarray,
+    p_hit: np.ndarray,
+    horizon: int,
+    gain: float = 50.0,
+    fix_joint5_angle: float | None = None,
+) -> np.ndarray:
+    """根据 env.actuator_mode 选择力矩版或位置版 JT 初始控制。"""
+    if getattr(env, "actuator_mode", 0) == 1:
+        return compute_jacobian_init_control_position(
+            env, x0, p_hit, horizon, gain=gain * _GAIN_TORQUE_TO_POSITION,
+            fix_joint5_angle=fix_joint5_angle,
+        )
+    return compute_jacobian_init_control(
+        env, x0, p_hit, horizon, gain=gain,
+        fix_joint5_angle=fix_joint5_angle,
+    )
+
+
+def _backswing_dispatch(
+    env: RM65Env,
+    x0: np.ndarray,
+    p_hit: np.ndarray,
+    v_hit_desired: np.ndarray,
+    horizon: int,
+    backswing_offset: float = 0,
+    backswing_ratio: float = 0,
+    fix_joint5_angle: float | None = None,
+    n_des: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """根据 env.actuator_mode 选择力矩版或位置版后摆 warm-start。"""
+    if getattr(env, "actuator_mode", 0) == 1:
+        U, q_des = generate_backswing_warm_start_position(
+            env, x0, p_hit, v_hit_desired, horizon,
+            backswing_offset=backswing_offset,
+            backswing_ratio=backswing_ratio,
+            fix_joint5_angle=fix_joint5_angle,
+            n_des=n_des,
+        )
+        return U, q_des
+    U, q_des = generate_backswing_warm_start(
+        env, x0, p_hit, v_hit_desired, horizon,
+        backswing_offset=backswing_offset,
+        backswing_ratio=backswing_ratio,
+        fix_joint5_angle=fix_joint5_angle,
+        n_des=n_des,
+    )
+    return U, q_des
+
+
+def _fix_joint5_dispatch(
+    U: np.ndarray,
+    x0: np.ndarray,
+    env: RM65Env,
+    fix_joint5_angle: float,
+) -> np.ndarray:
+    """根据 env.actuator_mode 选择力矩版或位置版 fix_joint5。"""
+    if getattr(env, "actuator_mode", 0) == 1:
+        return fix_joint5_control_trajectory_position(U, fix_joint5_angle)
+    return fix_joint5_control_trajectory(U, x0, env, fix_joint5_angle)
+
+
+def _fix_joint5_single_dispatch(
+    u: np.ndarray,
+    q_fixed: float,
+    x_current: np.ndarray,
+    nq: int,
+    env: RM65Env,
+) -> np.ndarray:
+    """单步 fix_joint5：力矩模式用 PD 保持，位置模式直接设目标角度。"""
+    if getattr(env, "actuator_mode", 0) == 1:
+        u = u.copy()
+        u[5] = q_fixed
+        return u
+    return fix_joint5_control(u, q_fixed, x_current, nq)
 
 
 # ==============================================================================
@@ -1610,9 +1693,9 @@ def do_replan(
         if len(U_prev) >= horizon_full // 3:
             U_warm = resample_control_sequence(U_prev, horizon_full)[:horizon_plan]
             if fix_joint5_angle is not None:
-                U_warm = fix_joint5_control_trajectory(U_warm, x_current, env_plan, fix_joint5_angle)
+                U_warm = _fix_joint5_dispatch(U_warm, x_current, env_plan, fix_joint5_angle)
         else:
-            U_warm = compute_jacobian_init_control(
+            U_warm = _jt_init_dispatch(
                 env_plan, x_current, p_follow_new, horizon_full, gain=30.0,
                 fix_joint5_angle=fix_joint5_angle,
             )[:horizon_plan]
@@ -1620,9 +1703,9 @@ def do_replan(
         if len(U_prev) >= horizon_full // 3:
             U_warm = resample_control_sequence(U_prev, horizon_full)[:horizon_plan]
             if fix_joint5_angle is not None:
-                U_warm = fix_joint5_control_trajectory(U_warm, x_current, env_plan, fix_joint5_angle)
+                U_warm = _fix_joint5_dispatch(U_warm, x_current, env_plan, fix_joint5_angle)
         else:
-            U_warm_full, _ = generate_backswing_warm_start(
+            U_warm_full, _ = _backswing_dispatch(
                 env_plan, x_current, p_follow_new, cfg.get("v_hit_at_contact", cfg["v_hit_desired"]), horizon_full,
                 backswing_offset=cfg.get("backswing_offset", 0.0),
                 backswing_ratio=cfg.get("backswing_ratio", 0.3),
@@ -1639,9 +1722,10 @@ def do_replan(
     cost_fn_plan = HittingCost(
         env_plan, p_terminal_v5, v_terminal_v5, Q_p_mat, Q_v_mat, R_mat,
         Q_n=cfg.get("normal_weight", 500000.0),
+        actuator_mode=1 if cfg.get("is_position_mode", False) else 0,
     )
 
-    if cfg.get("use_r_decay", False):
+    if cfg.get("use_r_decay", False) and not cfg.get("is_position_mode", False):
         R_schedule = compute_r_schedule(
             horizon_full, cfg["R"],
             decay_ratio=cfg.get("r_decay_ratio", 0.3),
@@ -1725,7 +1809,7 @@ def do_replan(
 
     if solver_ok:
         if fix_joint5_angle is not None:
-            U_mpc = fix_joint5_control_trajectory(U_mpc, x_current, env_plan, fix_joint5_angle)
+            U_mpc = _fix_joint5_dispatch(U_mpc, x_current, env_plan, fix_joint5_angle)
             result.U_mpc_full = U_mpc.copy()
 
         # U_prev：保存规划尾部，用于下次 warm start
@@ -1747,7 +1831,7 @@ def do_replan(
             result.U_buffer = U_mpc[:min(len(U_mpc), buffer_interval)].copy()
     else:
         # fallback: JT 控制
-        u_jt = compute_jacobian_init_control(
+        u_jt = _jt_init_dispatch(
             env_plan, x_current, p_follow_new, horizon=cfg["replan_interval"], gain=40.0,
         )
         result.U_buffer = u_jt[:cfg["replan_interval"]].copy()
@@ -1841,6 +1925,8 @@ def main() -> None:
                         help="观测门控速度噪声 std (m/s)")
     parser.add_argument("--obs-use-kf", action="store_true",
                         help="观测门控启用 KF 滤波")
+    parser.add_argument("--position-mode", action="store_true",
+                        help="启用位置控制模式（u=q_desired，PD执行器）")
     args = parser.parse_args()
 
     # 推导消融模式：--ablation 优先，否则从旧 flag 映射
@@ -1974,6 +2060,14 @@ def main() -> None:
     use_r_decay = not args.no_r_decay
     r_decay_ratio = args.r_decay
 
+    actuator_cfg = config_dict.get("actuator", {})
+    is_position_mode = args.position_mode or actuator_cfg.get("mode", "torque") == "position"
+    if is_position_mode:
+        kp_cfg = np.array(actuator_cfg.get("kp", [200.0, 200.0, 200.0, 50.0, 50.0, 20.0]), dtype=np.float64)
+        kd_cfg = np.array(actuator_cfg.get("kd", [20.0, 20.0, 5.0, 5.0, 5.0, 2.0]), dtype=np.float64)
+        use_r_decay = False
+        logger.info(f"[actuator] 位置模式: kp={kp_cfg.tolist()}, kd={kd_cfg.tolist()}")
+
     # v8: Tube 配置 — 轻量级走廊引导
     tube_cfg = TubeConfig(
         window_half_ms=args.window_ms,
@@ -1989,6 +2083,8 @@ def main() -> None:
     model_path = Path(__file__).resolve().parent.parent / "src" / "robot" / "rm65_model.xml"
     env = RM65Env(model_path, dt=dt)
     env.init_q_left = init_q_left
+    if is_position_mode:
+        env.configure_actuator_mode("position", kp=kp_cfg, kd=kd_cfg)
 
     # 加载真实机器人硬约束
     rl_cfg = config_dict.get("robot_limits", {})
@@ -2003,18 +2099,31 @@ def main() -> None:
         rl_cfg, dt=dt,
         ctrlrange=env.model.actuator_ctrlrange[:env.NU],
     )
-    logger.info(
-        "RobotLimits: q_lower=%.1f°(j0)/%.1f°(j3), qdot_max=%.1f°/s (scaled), "
-        "qddot_max=%.1f°/s² (scaled), u_range=[%.1f, %.1f]Nm, "
-        "max_tcp=%.1f m/s, exempt=%d步",
-        float(robot_limits.q_lower[0] * 180 / np.pi),
-        float(robot_limits.q_lower[3] * 180 / np.pi),
-        float(np.max(robot_limits.qdot_max) * 180 / np.pi),
-        float(np.max(robot_limits.qddot_max) * 180 / np.pi) if np.isfinite(robot_limits.qddot_max[0]) else float("inf"),
-        float(robot_limits.u_min[0]), float(robot_limits.u_max[0]),
-        robot_limits.max_tcp_speed if np.isfinite(robot_limits.max_tcp_speed) else -1.0,
-        robot_limits.terminal_exempt_steps,
-    )
+    if is_position_mode:
+        logger.info(
+            "RobotLimits: q_lower=%.1f°(j0)/%.1f°(j3), qdot_max=%.1f°/s (scaled), "
+            "dq_max=[%.4f, %.4f]rad/step, "
+            "max_tcp=%.1f m/s, exempt=%d步  [POSITION MODE]",
+            float(robot_limits.q_lower[0] * 180 / np.pi),
+            float(robot_limits.q_lower[3] * 180 / np.pi),
+            float(np.max(robot_limits.qdot_max) * 180 / np.pi),
+            float(robot_limits.dq_max[0]), float(robot_limits.dq_max[5]),
+            robot_limits.max_tcp_speed if np.isfinite(robot_limits.max_tcp_speed) else -1.0,
+            robot_limits.terminal_exempt_steps,
+        )
+    else:
+        logger.info(
+            "RobotLimits: q_lower=%.1f°(j0)/%.1f°(j3), qdot_max=%.1f°/s (scaled), "
+            "qddot_max=%.1f°/s² (scaled), u_range=[%.1f, %.1f]Nm, "
+            "max_tcp=%.1f m/s, exempt=%d步",
+            float(robot_limits.q_lower[0] * 180 / np.pi),
+            float(robot_limits.q_lower[3] * 180 / np.pi),
+            float(np.max(robot_limits.qdot_max) * 180 / np.pi),
+            float(np.max(robot_limits.qddot_max) * 180 / np.pi) if np.isfinite(robot_limits.qddot_max[0]) else float("inf"),
+            float(robot_limits.u_min[0]), float(robot_limits.u_max[0]),
+            robot_limits.max_tcp_speed if np.isfinite(robot_limits.max_tcp_speed) else -1.0,
+            robot_limits.terminal_exempt_steps,
+        )
 
     # 硬约束 body ID 缓存（初始化一次）
     import mujoco as _mj
@@ -2249,7 +2358,7 @@ def main() -> None:
     )
 
     if use_backswing:
-        U_prev, q_des_traj_init = generate_backswing_warm_start(
+        U_prev, q_des_traj_init = _backswing_dispatch(
             env, x0, p_target_init, v_hit_at_contact, k_hit_total,
             backswing_offset=backswing_offset,
             backswing_ratio=backswing_ratio,
@@ -2261,7 +2370,7 @@ def main() -> None:
             f"ratio={backswing_ratio:.1%}"
         )
     else:
-        U_prev = compute_jacobian_init_control(
+        U_prev = _jt_init_dispatch(
             env, x0, p_target_init, k_hit_total, gain=60.0,
             fix_joint5_angle=fix_joint5_angle,
         )
@@ -2294,6 +2403,7 @@ def main() -> None:
          Q_qdot=float(config_dict["cost"].get("Q_qdot", 0.0)),
          Q_qddot=float(config_dict["cost"].get("Q_qddot", 0.0)),
          Q_du=float(config_dict["cost"].get("Q_du", 0.0)),
+         actuator_mode=1 if is_position_mode else 0,
     )
 
     # v9: 根据 ablation_mode 创建代价函数
@@ -2667,6 +2777,7 @@ def main() -> None:
         "ablation_mode": ablation_mode,
         "tube_cfg": tube_cfg,
         "racket_speed": float(config_dict["hitting"]["racket_speed"]),
+        "is_position_mode": is_position_mode,
     }
     async_replanner = AsyncReplanner(env, do_replan, replan_cfg, state=replan_state, model_path=model_path)
     async_replanner.start()
@@ -3032,7 +3143,7 @@ def main() -> None:
                 if k_hit_new > far_threshold:
                     ball_pos_save_far, ball_vel_save_far = env.get_ball_state()
                     p_target_jt = p_follow_new if use_tube and hitting_tube is not None else p_follow_new
-                    u_jt = compute_jacobian_init_control(
+                    u_jt = _jt_init_dispatch(
                         env, x_current, p_target_jt, replan_interval, gain=60.0,
                         fix_joint5_angle=fix_joint5_angle,
                     )
@@ -3138,11 +3249,11 @@ def main() -> None:
                         if len(U_prev) >= horizon_full // 3:
                             U_warm = resample_control_sequence(U_prev, horizon_full)[:horizon_plan]
                             if fix_joint5_angle is not None:
-                                U_warm = fix_joint5_control_trajectory(
+                                U_warm = _fix_joint5_dispatch(
                                     U_warm, x_current, env, fix_joint5_angle,
                                 )
                         else:
-                            U_warm_full, _ = generate_backswing_warm_start(
+                            U_warm_full, _ = _backswing_dispatch(
                                 env, x_current, p_follow_new, v_hit_desired, horizon_full,
                                 backswing_offset=backswing_offset * backswing_scale,
                                 backswing_ratio=backswing_ratio,
@@ -3154,11 +3265,11 @@ def main() -> None:
                         if len(U_prev) >= horizon_full // 3:
                             U_warm = resample_control_sequence(U_prev, horizon_full)[:horizon_plan]
                             if fix_joint5_angle is not None:
-                                U_warm = fix_joint5_control_trajectory(
+                                U_warm = _fix_joint5_dispatch(
                                     U_warm, x_current, env, fix_joint5_angle,
                                 )
                         else:
-                            U_warm = compute_jacobian_init_control(
+                            U_warm = _jt_init_dispatch(
                                 env, x_current, p_follow_new, horizon_full, gain=30.0,
                                 fix_joint5_angle=fix_joint5_angle,
                             )[:horizon_plan]
@@ -3180,7 +3291,7 @@ def main() -> None:
                         )
 
                     if fix_joint5_angle is not None:
-                        U_mpc = fix_joint5_control_trajectory(
+                        U_mpc = _fix_joint5_dispatch(
                             U_mpc, x_current, env, fix_joint5_angle,
                         )
 
@@ -3246,19 +3357,23 @@ def main() -> None:
             buffer_exhaustion_count += 1
             u_cmd = np.zeros(env.NU)
             if k_hit_new > 0:
-                # 缓冲耗尽：雅可比转矩后备
                 env.set_arm_state(x_current)
                 p_ee = env.get_ee_pos()
                 J_p = env.get_ee_jacp()
                 err = p_hit_new - p_ee
-                tau_backup = J_p.T @ err * 30.0
-                tau_backup -= 2.0 * x_current[env.NQ:]
-                ctrl_lo = env.model.actuator_ctrlrange[:env.NU, 0]
-                ctrl_hi = env.model.actuator_ctrlrange[:env.NU, 1]
-                u_cmd = np.clip(tau_backup, ctrl_lo, ctrl_hi)
+                if is_position_mode:
+                    dq_backup = J_p.T @ err
+                    dq_backup = np.clip(dq_backup, -0.05, 0.05)
+                    u_cmd = x_current[:env.NQ] + dq_backup
+                else:
+                    tau_backup = J_p.T @ err * 30.0
+                    tau_backup -= 2.0 * x_current[env.NQ:]
+                    ctrl_lo = env.model.actuator_ctrlrange[:env.NU, 0]
+                    ctrl_hi = env.model.actuator_ctrlrange[:env.NU, 1]
+                    u_cmd = np.clip(tau_backup, ctrl_lo, ctrl_hi)
 
         if fix_joint5_angle is not None:
-            u_cmd = fix_joint5_control(u_cmd, fix_joint5_angle, x_current, env.NQ)
+            u_cmd = _fix_joint5_single_dispatch(u_cmd, fix_joint5_angle, x_current, env.NQ, env)
 
         # ---- 碰撞检测：提前开窗（30步），末段无条件 ----
         enable_collision = False
@@ -3279,12 +3394,15 @@ def main() -> None:
         beta_list_x = [1.0, 0.6, 0.3, 0.0]
         u_xsafe = u_cmd
         for beta_x in beta_list_x:
-            u_try_x = beta_x * u_cmd
+            if is_position_mode:
+                u_try_x = x_current[:env.NQ] + beta_x * (u_cmd - x_current[:env.NQ])
+            else:
+                u_try_x = beta_x * u_cmd
             ctrl_lo = env.model.actuator_ctrlrange[:env.NU, 0]
             ctrl_hi = env.model.actuator_ctrlrange[:env.NU, 1]
             u_try_x = np.clip(u_try_x, ctrl_lo, ctrl_hi)
             if fix_joint5_angle is not None:
-                u_try_x = fix_joint5_control(u_try_x, fix_joint5_angle, x_current, env.NQ)
+                u_try_x = _fix_joint5_single_dispatch(u_try_x, fix_joint5_angle, x_current, env.NQ, env)
 
             x_pred = env.step_from_state(x_current, u_try_x)
             env.set_arm_state(x_pred)
@@ -3318,10 +3436,13 @@ def main() -> None:
             safety_beta_list = [0.8, 0.6, 0.4, 0.2, 0.0]
             found_safe = False
             for beta_s in safety_beta_list:
-                u_try_s = beta_s * u_xsafe
+                if is_position_mode:
+                    u_try_s = x_current[:env.NQ] + beta_s * (u_xsafe - x_current[:env.NQ])
+                else:
+                    u_try_s = beta_s * u_xsafe
                 u_try_s = np.clip(u_try_s, ctrl_lo, ctrl_hi)
                 if fix_joint5_angle is not None:
-                    u_try_s = fix_joint5_control(u_try_s, fix_joint5_angle, x_current, env.NQ)
+                    u_try_s = _fix_joint5_single_dispatch(u_try_s, fix_joint5_angle, x_current, env.NQ, env)
                 env.set_arm_state(arm_save_sf)
                 ok_s, _ = check_one_step_feasibility(
                     x_current, u_try_s, robot_limits, dt,
@@ -3339,7 +3460,10 @@ def main() -> None:
                         )
                     break
             if not found_safe:
-                u_xsafe = -20.0 * x_current[env.NQ:]
+                if is_position_mode:
+                    u_xsafe = x_current[:env.NQ].copy()
+                else:
+                    u_xsafe = -20.0 * x_current[env.NQ:]
                 exec_metrics.emergency_stop_count += 1
                 logger.warning(
                     "[EMERGENCY_STOP] 步 %d: %s, safe_hold 阻尼制动",
@@ -3364,12 +3488,15 @@ def main() -> None:
         if violated:
             q_now = x_current[:env.NQ]
             qdot_now = x_current[env.NQ:]
-            u_push = 300.0 * (init_q - q_now) - 20.0 * qdot_now
-            u_push = np.clip(u_push,
-                             env.model.actuator_ctrlrange[:env.NU, 0],
-                             env.model.actuator_ctrlrange[:env.NU, 1])
+            if is_position_mode:
+                u_push = init_q.copy()
+            else:
+                u_push = 300.0 * (init_q - q_now) - 20.0 * qdot_now
+                u_push = np.clip(u_push,
+                                 env.model.actuator_ctrlrange[:env.NU, 0],
+                                 env.model.actuator_ctrlrange[:env.NU, 1])
             if fix_joint5_angle is not None:
-                u_push = fix_joint5_control(u_push, fix_joint5_angle, x_current, env.NQ)
+                u_push = _fix_joint5_single_dispatch(u_push, fix_joint5_angle, x_current, env.NQ, env)
             x_current, ball_pos, ball_vel = env.step_full(u_push)
             logger.warning(
                 f"步 {step}: 臂越界 ({len(violated)} bodies: {', '.join(violated[:3])}...), "
@@ -3502,28 +3629,42 @@ def main() -> None:
 
                 # 任务空间 PD + 雅可比转置映射到关节空间
                 env.update_kinematics()
-                p_ee_cur = env.get_ee_pos()
-                J_p = env.get_ee_jacp()[:, :env.NQ]
-                dp = p_des_follow - p_ee_cur
-                Kp_follow = 200.0
-                Kd_follow = 20.0
-                F_follow = Kp_follow * dp - Kd_follow * J_p @ x_current[env.NQ:]
-                u_follow = J_p.T @ F_follow
+                if is_position_mode:
+                    u_follow = env.solve_ik(p_des_follow, q_init=x_current[:env.NQ], max_iter=20, eps=1e-2)
+                else:
+                    p_ee_cur = env.get_ee_pos()
+                    J_p = env.get_ee_jacp()[:, :env.NQ]
+                    dp = p_des_follow - p_ee_cur
+                    Kp_follow = 200.0
+                    Kd_follow = 20.0
+                    F_follow = Kp_follow * dp - Kd_follow * J_p @ x_current[env.NQ:]
+                    u_follow = J_p.T @ F_follow
                 u_follow = np.clip(u_follow,
                                    env.model.actuator_ctrlrange[:env.NU, 0],
                                    env.model.actuator_ctrlrange[:env.NU, 1])
                 # v4: TCP 速度限制 — 随挥阶段同样受限于 max_tcp
-                v_ee_follow = J_p @ x_current[env.NQ:]
-                tcp_speed_follow = float(np.linalg.norm(v_ee_follow))
                 max_tcp_limit = float(args.max_tcp) if args.max_tcp and args.max_tcp > 0 else float('inf')
-                if tcp_speed_follow > max_tcp_limit:
-                    scale_factor = max_tcp_limit / tcp_speed_follow
-                    u_follow *= scale_factor
+                if is_position_mode:
+                    x_pred = env.step_from_state(x_current, u_follow)
+                    env.set_arm_state(x_pred)
+                    tcp_speed_follow = float(np.linalg.norm(env.get_ee_vel()))
+                    if tcp_speed_follow > max_tcp_limit:
+                        q_cur = x_current[:env.NQ]
+                        u_follow = q_cur + (max_tcp_limit / tcp_speed_follow) * (u_follow - q_cur)
+                    env.set_arm_state(x_current)
+                else:
+                    v_ee_follow = J_p @ x_current[env.NQ:]
+                    tcp_speed_follow = float(np.linalg.norm(v_ee_follow))
+                    if tcp_speed_follow > max_tcp_limit:
+                        u_follow *= max_tcp_limit / tcp_speed_follow
                 # v11: X 平面墙检查 — 随挥阶段也检查不越界
                 ball_save_ft = env.get_ball_state()
                 x_save_ft = x_current.copy()
                 for beta_ft in [1.0, 0.6, 0.3, 0.0]:
-                    u_try_ft = beta_ft * u_follow
+                    if is_position_mode:
+                        u_try_ft = x_current[:env.NQ] + beta_ft * (u_follow - x_current[:env.NQ])
+                    else:
+                        u_try_ft = beta_ft * u_follow
                     u_try_ft = np.clip(u_try_ft,
                                        env.model.actuator_ctrlrange[:env.NU, 0],
                                        env.model.actuator_ctrlrange[:env.NU, 1])
@@ -3560,12 +3701,15 @@ def main() -> None:
     logger.info(f"击打后继续仿真 {post_hit_steps} 步...")
     for _ in range(post_hit_steps):
         q_hold = x_current[:env.NQ].copy()
-        u_hold = 100.0 * (q_hold - x_current[:env.NQ]) - 10.0 * x_current[env.NQ:]
-        u_hold = np.clip(u_hold,
-                         env.model.actuator_ctrlrange[:env.NU, 0],
-                         env.model.actuator_ctrlrange[:env.NU, 1])
+        if is_position_mode:
+            u_hold = q_hold.copy()
+        else:
+            u_hold = 100.0 * (q_hold - x_current[:env.NQ]) - 10.0 * x_current[env.NQ:]
+            u_hold = np.clip(u_hold,
+                             env.model.actuator_ctrlrange[:env.NU, 0],
+                             env.model.actuator_ctrlrange[:env.NU, 1])
         if fix_joint5_angle is not None:
-            u_hold = fix_joint5_control(u_hold, fix_joint5_angle, x_current, env.NQ)
+            u_hold = _fix_joint5_single_dispatch(u_hold, fix_joint5_angle, x_current, env.NQ, env)
         x_current, ball_pos, _ = env.step_full(u_hold)
         X_history.append(x_current.copy())
         U_history.append(u_hold.copy())
@@ -3738,7 +3882,7 @@ def main() -> None:
 
     print(f"  ablation: {ablation_mode}, Tube={'ON' if ablation_mode in ('full','tube_only') else 'OFF'}, Softmin={'ON' if ablation_mode in ('full','softmin_only') else 'OFF'}")
     if ablation_mode in ("full", "softmin_only") and cost_fn is not base_cost_fn and hasattr(cost_fn, '_last_softmin_alphas') and len(cost_fn._last_softmin_alphas) > 0:
-        print(f"  --- Softmin 诊断 ---")
+        print("  --- Softmin 诊断 ---")
         alphas = cost_fn._last_softmin_alphas
         costs_s = cost_fn._last_softmin_costs if len(cost_fn._last_softmin_costs) > 0 else np.zeros(0)
         print(f"  Softmin终端: 候选数={len(alphas)}, beta={args.softmin_beta:.1f}")
@@ -3766,7 +3910,7 @@ def main() -> None:
     print(f"  后摆: {'启用' if use_backswing else '禁用'}")
     print(f"  随挥偏移: {hit_shift:.3f}m")
     print(f"  R 退火: {'启用' if use_r_decay else '禁用'}")
-    print(f"  --- Tube 专用指标 ---")
+    print("  --- Tube 专用指标 ---")
     print(f"  最小球拍-球距离: {min_dist:.4f} m")
     print(f"  ball_near 步数: {ball_near_duration} = {ball_near_ms:.1f} ms  (球物理上在拍附近)")
     print(f"  tube_ready 步数: {tube_ready_duration} = {tube_ready_ms:.1f} ms  (球拍在窗口内保持击球姿态)")
@@ -3778,7 +3922,7 @@ def main() -> None:
     print(f"  Weighted tube cost: {weighted_tube_cost:.2f}")
     print(f"  击打时间误差: {hit_time_error:.1f} ms")
     print(f"  击打位置误差: {hit_position_error:.4f} m")
-    print(f"  --- 计算性能 ---")
+    print("  --- 计算性能 ---")
     print(f"  总墙钟时间: {t_total:.2f}s")
     print(f"    MPC 计算阶段: {t_mpc:.2f}s ({n_mpc_steps}步, 仿真时间={mpc_sim_time:.3f}s)")
     print(f"    MPC 实时比率: {mpc_realtime_ratio:.2f}x (纯计算, >1=超实时)")
@@ -3796,10 +3940,10 @@ def main() -> None:
         near_tag = "[!!] 超预算" if near_over_budget else "[OK]"
         print(f"    near阶段({len(near_rt)}次, k_hit<={near_k_threshold}): avg={avg_near_replan_ms:.0f}ms, max={max_near_replan_ms:.0f}ms / 预算={near_budget_ms:.0f}ms(buffer扩展2x) {near_tag}")
     if steady_realtime_ok and n_steady > 0:
-        print(f"    稳态实时性: [OK] 所有稳态重规划在预算内")
+        print("    稳态实时性: [OK] 所有稳态重规划在预算内")
     elif n_steady > 0:
-        print(f"    稳态实时性: [!!] 存在超预算重规划, 需增大 replan_interval 或优化 iLQR")
-    print(f"  --- 逐步执行性能 ---")
+        print("    稳态实时性: [!!] 存在超预算重规划, 需增大 replan_interval 或优化 iLQR")
+    print("  --- 逐步执行性能 ---")
     print(f"    MPC 每步平均:     {avg_step_ms:.1f}ms ({n_mpc_steps}步)")
     n_non_replan = n_mpc_steps - n_replans
     if avg_non_replan_step_ms > 0:
@@ -3810,7 +3954,7 @@ def main() -> None:
         else:
             print(f"                      [OK] 预估在预算内 (<{dt*1000:.0f}ms)")
     print(f"    最慢步耗时:       {max_step_ms:.1f}ms")
-    print(f"  --- 执行层约束 ---")
+    print("  --- 执行层约束 ---")
     hit_type = "主动击球" if active_contact else ("被动接触" if passive_contact else "未触球")
     print(f"  max_qdot={exec_metrics.max_qdot_ratio:.2f}x, max_tcp={exec_metrics.max_tcp_speed:.1f}m/s, "
           f"max_face={exec_metrics.max_racket_face_speed:.1f}m/s")

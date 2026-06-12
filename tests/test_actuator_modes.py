@@ -1,9 +1,10 @@
 """执行器双模式（力矩/位置）测试。
 
-覆盖 Stage -1 切片 1-15：RM65Env 位置模式物理正确性、力矩模式零回归、
+覆盖 Stage -1 切片 1-16：RM65Env 位置模式物理正确性、力矩模式零回归、
 ctrlrange 切换、属性防错、clone 同步、reset 不影响配置、
 Python 解析线性化 B/A 矩阵位置模式数学结构验证、
-安全约束双模式、前向传递双模式、代价函数 R=0。
+安全约束双模式、前向传递双模式、代价函数 R=0、
+JT 初始控制角度增量版。
 """
 
 import numpy as np
@@ -792,3 +793,205 @@ class TestCostPositionMode:
 
         assert np.linalg.norm(l_u_t) > 1e-6, "力矩模式 l_u 应非零"
         assert np.linalg.norm(l_uu_t) > 1e-6, "力矩模式 l_uu 应非零"
+
+
+class TestJTInitPosition:
+    """切片 16：JT 初始控制角度增量版。"""
+
+    @staticmethod
+    def _make_position_env() -> RM65Env:
+        """创建配置了位置模式的 RM65Env。"""
+        env = _make_env()
+        kp = np.array([200.0, 200.0, 200.0, 50.0, 50.0, 20.0])
+        kd = np.array([20.0, 20.0, 20.0, 5.0, 5.0, 2.0])
+        env.configure_actuator_mode("position", kp=kp, kd=kd)
+        env.reset(q0=np.array([0.0, -1.2, 1.8, -0.6, 0.0, 0.0]))
+        return env
+
+    def test_jt_init_outputs_valid_angles(self) -> None:
+        """位置模式 JT 初始控制输出在 jnt_range 内的角度值。"""
+        from src.ilqt.jt_init import compute_jacobian_init_control_position
+
+        env = self._make_position_env()
+        x0 = env.get_arm_state()
+        p_hit = np.array([0.4, -0.3, 1.0])
+        horizon = 40
+
+        U = compute_jacobian_init_control_position(env, x0, p_hit, horizon, gain=0.3)
+
+        assert U.shape == (horizon, 6), f"U 形状错误: {U.shape}"
+
+        for i in range(6):
+            jnt_id = env.model.actuator_trnid[i, 0]
+            lo = env.model.jnt_range[jnt_id, 0]
+            hi = env.model.jnt_range[jnt_id, 1]
+            assert np.all(U[:, i] >= lo - 0.01), \
+                f"关节 {i} 角度 {U[:, i].min():.4f} 低于下限 {lo:.4f}"
+            assert np.all(U[:, i] <= hi + 0.01), \
+                f"关节 {i} 角度 {U[:, i].max():.4f} 超过上限 {hi:.4f}"
+
+    def test_jt_init_progressive_approach(self) -> None:
+        """序列渐进：最后一步比第一步更接近击打点。"""
+        from src.ilqt.jt_init import compute_jacobian_init_control_position
+
+        env = self._make_position_env()
+        x0 = env.get_arm_state()
+        p_hit = np.array([0.4, -0.3, 1.0])
+        horizon = 60
+
+        U = compute_jacobian_init_control_position(env, x0, p_hit, horizon, gain=0.3)
+
+        env.set_arm_state(x0)
+        p_ee_init = env.get_ee_pos()
+        dist_init = np.linalg.norm(p_ee_init - p_hit)
+
+        env.set_arm_state(np.concatenate([U[-1, :6], np.zeros(6)]))
+        p_ee_final = env.get_ee_pos()
+        dist_final = np.linalg.norm(p_ee_final - p_hit)
+
+        assert dist_final < dist_init, \
+            f"末端未接近击打点: dist_final={dist_final:.4f} >= dist_init={dist_init:.4f}"
+
+    def test_jt_init_not_torque_scale(self) -> None:
+        """输出量级是弧度（|u| < π+0.1），不是力矩（|u| > 10）。"""
+        from src.ilqt.jt_init import compute_jacobian_init_control_position
+
+        env = self._make_position_env()
+        x0 = env.get_arm_state()
+        p_hit = np.array([0.4, -0.3, 1.0])
+        horizon = 40
+
+        U_pos = compute_jacobian_init_control_position(env, x0, p_hit, horizon, gain=0.3)
+
+        assert np.all(np.abs(U_pos) < np.pi + 0.1), \
+            f"位置模式输出超出弧度范围: max={np.abs(U_pos).max():.4f}"
+
+    def test_jt_init_fix_joint5(self) -> None:
+        """fix_joint5_angle=0.5 时，所有 U[:,5] = 0.5。"""
+        from src.ilqt.jt_init import compute_jacobian_init_control_position
+
+        env = self._make_position_env()
+        x0 = env.get_arm_state()
+        p_hit = np.array([0.4, -0.3, 1.0])
+        horizon = 30
+        fix_angle = 0.5
+
+        U = compute_jacobian_init_control_position(
+            env, x0, p_hit, horizon, gain=0.3, fix_joint5_angle=fix_angle,
+        )
+
+        np.testing.assert_allclose(U[:, 5], fix_angle, atol=0.01,
+                                   err_msg="fix_joint5 角度不正确")
+
+    def test_jt_init_no_nan_after_rollout(self) -> None:
+        """逐步 rollout 后无 NaN。"""
+        from src.ilqt.jt_init import compute_jacobian_init_control_position
+
+        env = self._make_position_env()
+        x0 = env.get_arm_state()
+        p_hit = np.array([0.4, -0.3, 1.0])
+        horizon = 50
+
+        U = compute_jacobian_init_control_position(env, x0, p_hit, horizon, gain=0.3)
+
+        assert not np.any(np.isnan(U)), "U 中有 NaN"
+        x = x0.copy()
+        for k in range(horizon):
+            x = env.step_from_state(x, U[k])
+            assert not np.any(np.isnan(x)), f"步 {k} 后状态有 NaN"
+
+    def test_fix_joint5_trajectory_position(self) -> None:
+        """fix_joint5_control_trajectory_position 直接替换第 5 关节为固定角度。"""
+        from src.ilqt.jt_init import fix_joint5_control_trajectory_position
+
+        U = np.random.randn(20, 6)
+        q_fixed = 0.7
+
+        U_fixed = fix_joint5_control_trajectory_position(U, q_fixed)
+
+        np.testing.assert_allclose(U_fixed[:, 5], q_fixed)
+        assert not np.allclose(U_fixed[:, :5], 0), "其他关节不应被修改"
+
+    def test_backswing_warm_start_position_outputs_angles(self) -> None:
+        """位置模式后摆 warm-start 输出角度（|U| < π+0.1）。"""
+        from src.ilqt.jt_init import generate_backswing_warm_start_position
+
+        env = self._make_position_env()
+        x0 = env.get_arm_state()
+        p_hit = np.array([0.4, -0.3, 1.0])
+        v_hit = np.array([-3.0, 0.0, 1.0])
+        horizon = 80
+
+        U, q_des = generate_backswing_warm_start_position(
+            env, x0, p_hit, v_hit, horizon,
+            backswing_offset=-0.6, backswing_ratio=0.35,
+        )
+
+        assert U.shape == (horizon, 6)
+        assert q_des.shape == (horizon, 6)
+        assert np.all(np.abs(U) < np.pi + 0.1), \
+            f"后摆输出超出弧度范围: max={np.abs(U).max():.4f}"
+        assert not np.any(np.isnan(U)), "后摆输出有 NaN"
+
+
+# ==============================================================================
+#  切片 17：V11 端到端位置模式集成测试
+# ==============================================================================
+
+
+@pytest.mark.slow
+class TestV11Integration:
+    """切片 17：V11 main() 位置模式端到端集成测试。
+
+    通过 subprocess 运行 V11 脚本，验证：
+    1. 位置模式运行不崩溃（RC=0）
+    2. 无 ERROR/CRASH/EMERGENCY_STOP/NaN
+    3. 位置模式配置正确生效
+    """
+
+    @staticmethod
+    def _run_v11(args: list[str], timeout: int = 300) -> tuple[int, str, str]:
+        """运行 V11 主脚本并返回 (returncode, stdout, stderr)。"""
+        import subprocess
+        import sys
+        from pathlib import Path
+        script = Path(__file__).resolve().parent.parent / "scripts" / "rm65_mpc_v11.py"
+        result = subprocess.run(
+            [sys.executable, str(script)] + args,
+            capture_output=True, text=True, timeout=timeout,
+        )
+        return result.returncode, result.stdout, result.stderr
+
+    def test_v11_position_mode_no_crash(self) -> None:
+        """位置模式 V11 运行不崩溃，无 ERROR/EMERGENCY_STOP/NaN。"""
+        rc, stdout, stderr = self._run_v11(
+            ["--position-mode", "--no-plot", "--seed", "42",
+             "--ball-speed", "7", "--no-bounce", "--replan-interval", "20"],
+            timeout=120,
+        )
+
+        assert rc == 0, f"V11 位置模式返回码非零: rc={rc}, stderr={stderr[-500:]}"
+
+        combined = stdout + stderr
+        assert "EMERGENCY_STOP" not in combined, \
+            "位置模式触发了紧急制动"
+        assert "NaN" not in combined, \
+            "位置模式输出含 NaN"
+
+    def test_v11_position_mode_config_applied(self) -> None:
+        """位置模式 V11 正确配置并输出位置模式日志。"""
+        rc, stdout, stderr = self._run_v11(
+            ["--position-mode", "--no-plot", "--seed", "42",
+             "--ball-speed", "7", "--no-bounce", "--replan-interval", "20"],
+            timeout=120,
+        )
+
+        assert rc == 0, f"V11 返回码非零: rc={rc}"
+
+        combined = stdout + stderr
+        assert "[actuator] 位置模式" in combined, \
+            "位置模式日志未输出，配置可能未生效"
+        assert "POSITION MODE" in combined, \
+            "RobotLimits 日志未标记 POSITION MODE"
+        assert "dq_max" in combined, \
+            "位置模式日志未输出 dq_max 信息"

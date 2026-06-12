@@ -31,7 +31,6 @@ from pathlib import Path
 import numpy as np
 
 from src.sim.rm65_env import RM65Env
-from src.ilqt.robot_limits import RobotLimits
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +125,6 @@ class AsyncReplanner:
     @staticmethod
     def _find_model_path(env: RM65Env) -> Path:
         """从 env 实例推导 model 文件路径。"""
-        import mujoco
         # MuJoCo 3.x: model.filedir 给出 XML 目录
         filedir = env.model.filedir
         # 查找目录下的 XML 文件
@@ -206,6 +204,7 @@ class AsyncReplanner:
             self.env_plan = RM65Env(self._model_path, dt=self._dt)
             if hasattr(self._env, 'init_q_left'):
                 self.env_plan.init_q_left = self._env.init_q_left.copy()
+            self._env.clone_actuator_config(self.env_plan)
             # 初始化 env_plan 的 qpos 到默认值并调用 mj_forward
             import mujoco
             mujoco.mj_forward(self.env_plan.model, self.env_plan.data)
