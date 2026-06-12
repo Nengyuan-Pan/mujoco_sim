@@ -34,22 +34,19 @@ class HittingCost:
         Q_qdot: float = 0.0,
         Q_qddot: float = 0.0,
         Q_du: float = 0.0,
-        # v6: softmin 多终端候选
         softmin_candidates: np.ndarray | None = None,
         softmin_beta: float = 5.0,
         softmin_weights: np.ndarray | None = None,
-        # v6: 速度最大化（负代价）
         maximize_v_at_midpoint: bool = False,
         v_maximize_direction: np.ndarray | None = None,
         Q_v_max: float = 5000.0,
         Q_v_max_eps: float = 0.01,
-        # v6: TCP 速度软惩罚
         Q_tcp_soft: float = 0.0,
         tcp_threshold: float = 1.44,
         max_tcp_speed: float = 1.8,
-        # v6: 关节速度阈值软惩罚
         Q_qdot_limit: float = 0.0,
         qdot_limit_thresholds: np.ndarray | None = None,
+        actuator_mode: int = 0,
     ) -> None:
         """初始化代价函数。
 
@@ -92,13 +89,15 @@ class HittingCost:
         self.p_hit = p_hit.copy()
         self.v_hit = v_hit.copy()
         self._p_ball_running = p_ball_running.copy() if p_ball_running is not None else None
-        # 保存原始权重（用于 update_weights 缩放）
         self._Q_p_base = np.diag(Q_p) if Q_p.ndim == 1 else Q_p.copy()
         self._Q_v_base = np.diag(Q_v) if Q_v.ndim == 1 else Q_v.copy()
-        # 确保权重为对角矩阵
         self.Q_p = self._Q_p_base.copy()
         self.Q_v = self._Q_v_base.copy()
-        self.R_mat = R * np.eye(env.NU)
+        self._actuator_mode = actuator_mode
+        if actuator_mode == 1:
+            self.R_mat = np.zeros((env.NU, env.NU))
+        else:
+            self.R_mat = R * np.eye(env.NU)
         self._R_scalar = R
         # 关节级控制代价缩放
         self._R_joint_scale = R_joint_scale or {}
@@ -365,7 +364,9 @@ class HittingCost:
         Returns:
             运行代价值。
         """
-        if k is not None and self._R_schedule is not None and k < len(self._R_schedule):
+        if self._actuator_mode == 1:
+            cost = 0.0
+        elif k is not None and self._R_schedule is not None and k < len(self._R_schedule):
             R_k = self._R_schedule[k]
             if np.ndim(R_k) == 0:
                 cost = 0.5 * R_k * (u @ u)
@@ -520,8 +521,11 @@ class HittingCost:
         if need_fk:
             self.env.set_arm_state(x)
 
-        # 时变 R 调度
-        if k is not None and self._R_schedule is not None and k < len(self._R_schedule):
+        # 时变 R 调度（位置模式 R=0）
+        if self._actuator_mode == 1:
+            l_u = np.zeros(n_u)
+            l_uu = np.zeros((n_u, n_u))
+        elif k is not None and self._R_schedule is not None and k < len(self._R_schedule):
             R_k = self._R_schedule[k]
             if np.ndim(R_k) == 0:
                 l_u = R_k * u

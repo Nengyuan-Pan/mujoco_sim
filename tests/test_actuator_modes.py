@@ -1,8 +1,9 @@
 """执行器双模式（力矩/位置）测试。
 
-覆盖 Stage -1 切片 1-9：RM65Env 位置模式物理正确性、力矩模式零回归、
+覆盖 Stage -1 切片 1-15：RM65Env 位置模式物理正确性、力矩模式零回归、
 ctrlrange 切换、属性防错、clone 同步、reset 不影响配置、
-Python 解析线性化 B/A 矩阵位置模式数学结构验证。
+Python 解析线性化 B/A 矩阵位置模式数学结构验证、
+安全约束双模式、前向传递双模式、代价函数 R=0。
 """
 
 import numpy as np
@@ -528,3 +529,266 @@ class TestSolverIntegration:
         assert U.shape == (10, 6)
         assert np.all(np.isfinite(X)), "C++ 位置模式 X 含 NaN/Inf"
         assert np.all(np.isfinite(U)), "C++ 位置模式 U 含 NaN/Inf"
+
+
+# ==============================================================================
+#  切片 12-13：安全约束双模式
+# ==============================================================================
+
+
+class TestSafetyPositionMode:
+    """切片 12-13：RobotLimits dq_max + strict_braking_check 双模式。"""
+
+    def _make_limits(self, dt: float = 0.005) -> "RobotLimits":
+        """构造测试用 RobotLimits，含 dq_max。"""
+        from src.ilqt.robot_limits import RobotLimits
+
+        deg = np.pi / 180.0
+        qdot_max = np.array([180, 180, 225, 225, 225, 225], dtype=np.float64) * deg
+        dq_max_fraction = 0.5
+        return RobotLimits(
+            q_lower=-np.ones(6),
+            q_upper=np.ones(6),
+            qdot_max=qdot_max,
+            qddot_max=np.full(6, np.inf),
+            u_min=-np.full(6, 150.0),
+            u_max=np.full(6, 150.0),
+            dq_max=qdot_max * dt * dq_max_fraction,
+        )
+
+    def test_check_step_uses_dq_max_in_position_mode(self) -> None:
+        """位置模式 check_step_feasibility 检查 |u-q| < dq_max。
+
+        力矩模式仍检查 u_min/u_max。
+        """
+        from src.ilqt.robot_limits import check_step_feasibility
+
+        limits = self._make_limits()
+        nq = 6
+        q = np.zeros(nq)
+        x_prev = np.concatenate([q, np.zeros(nq)])
+        x_next = x_prev.copy()
+        dt = 0.005
+
+        ok_torque, _ = check_step_feasibility(
+            x_prev, x_next, np.full(nq, 100.0), limits, dt,
+            actuator_mode=0,
+        )
+        assert ok_torque, "力矩模式 u=100 < u_max=150 应通过"
+
+        ok_torque_over, reason = check_step_feasibility(
+            x_prev, x_next, np.full(nq, 200.0), limits, dt,
+            actuator_mode=0,
+        )
+        assert not ok_torque_over, "力矩模式 u=200 > u_max=150 应拒绝"
+        assert "u upper" in reason
+
+        dq_max_val = limits.dq_max[0]
+
+        u_within = q + 0.5 * dq_max_val
+        ok_pos, _ = check_step_feasibility(
+            x_prev, x_next, u_within, limits, dt,
+            actuator_mode=1,
+        )
+        assert ok_pos, f"位置模式 dq={0.5*dq_max_val:.4f} < dq_max={dq_max_val:.4f} 应通过"
+
+        u_over = q + 2.0 * dq_max_val
+        ok_pos_over, reason_pos = check_step_feasibility(
+            x_prev, x_next, u_over, limits, dt,
+            actuator_mode=1,
+        )
+        assert not ok_pos_over, f"位置模式 dq={2.0*dq_max_val:.4f} > dq_max 应拒绝"
+        assert "dq limit" in reason_pos
+
+    def test_strict_braking_position_mode(self) -> None:
+        """位置模式 strict_braking_check 使用 dq_max 约束。"""
+        from src.ilqt.robot_limits import strict_braking_check
+
+        limits = self._make_limits()
+        nq = 6
+        q = np.zeros(nq)
+        x_prev = np.concatenate([q, np.zeros(nq)])
+        x_next = x_prev.copy()
+        dt = 0.005
+
+        ok_torque, _ = strict_braking_check(
+            x_prev, x_next, np.full(nq, 100.0), limits, dt,
+            actuator_mode=0,
+        )
+        assert ok_torque, "力矩模式 strict_braking u=100 应通过"
+
+        ok_torque_over, reason = strict_braking_check(
+            x_prev, x_next, np.full(nq, 200.0), limits, dt,
+            actuator_mode=0,
+        )
+        assert not ok_torque_over, "力矩模式 strict_braking u=200 应拒绝"
+        assert "u upper" in reason
+
+        dq_max_val = limits.dq_max[0]
+        u_over = q + 2.0 * dq_max_val
+        ok_pos_over, reason_pos = strict_braking_check(
+            x_prev, x_next, u_over, limits, dt,
+            actuator_mode=1,
+        )
+        assert not ok_pos_over, "位置模式 strict_braking dq 超限应拒绝"
+        assert "dq limit" in reason_pos
+
+        u_within = q + 0.5 * dq_max_val
+        ok_pos, _ = strict_braking_check(
+            x_prev, x_next, u_within, limits, dt,
+            actuator_mode=1,
+        )
+        assert ok_pos, "位置模式 strict_braking dq 内应通过"
+
+    def test_check_one_step_reads_actuator_mode_from_env(self) -> None:
+        """check_one_step_feasibility 从 env 自动读取 actuator_mode。"""
+        from src.ilqt.robot_limits import check_one_step_feasibility
+
+        env = _make_env()
+        kp = np.array([200.0, 200.0, 200.0, 50.0, 50.0, 20.0])
+        kd = np.array([20.0, 20.0, 5.0, 5.0, 5.0, 2.0])
+        env.configure_actuator_mode("position", kp=kp, kd=kd)
+        env.reset(q0=np.zeros(6))
+
+        limits = self._make_limits()
+        nq = 6
+        x0 = np.concatenate([np.zeros(nq), np.zeros(nq)])
+
+        def _step(x, u):
+            return env.step_from_state(x, u)
+
+        dq_max_val = limits.dq_max[0]
+        u_over = np.full(nq, 2.0 * dq_max_val)
+
+        ok, reason = check_one_step_feasibility(
+            x0, u_over, limits, env.dt,
+            step_predictor=_step, env=env,
+        )
+        assert not ok, "env 位置模式下应使用 dq_max 检查"
+        assert "dq limit" in reason
+
+
+# ==============================================================================
+#  切片 14：前向传递双模式
+# ==============================================================================
+
+
+class TestForwardPassPosition:
+    """切片 14：forward pass 传递 actuator_mode。"""
+
+    def test_forward_pass_single_position_mode(self) -> None:
+        """位置模式下 forward_pass_single 正确传递 actuator_mode。"""
+        from src.ilqt.robot_limits import RobotLimits
+        from src.ilqt.cost import HittingCost
+        from src.ilqt.utils import forward_pass_single
+
+        env = _make_env()
+        kp = np.array([200.0, 200.0, 200.0, 50.0, 50.0, 20.0])
+        kd = np.array([20.0, 20.0, 5.0, 5.0, 5.0, 2.0])
+        env.configure_actuator_mode("position", kp=kp, kd=kd)
+        q0 = np.array([0.0, -1.2, 1.8, -0.6, 0.0, 0.0])
+        env.reset(q0=q0)
+
+        N = 5
+        x0 = np.concatenate([q0, np.zeros(6)])
+        X = np.tile(x0, (N + 1, 1))
+        U = np.tile(q0, (N, 1))
+
+        p_hit = np.array([0.4, -0.3, 1.0])
+        v_hit = np.array([-2.0, 0.0, 1.0])
+        Q_p = np.diag([5000.0, 5000.0, 5000.0])
+        Q_v = np.diag([10.0, 10.0, 10.0])
+        cost_fn = HittingCost(env, p_hit, v_hit, Q_p, Q_v, R=0.0)
+
+        Ks = [np.zeros((6, 12)) for _ in range(N)]
+        ks = [np.zeros(6) for _ in range(N)]
+
+        deg = np.pi / 180.0
+        qdot_max = np.array([180, 180, 225, 225, 225, 225], dtype=np.float64) * deg
+        limits = RobotLimits(
+            q_lower=-np.ones(6) * 3.0,
+            q_upper=np.ones(6) * 3.0,
+            qdot_max=qdot_max,
+            qddot_max=np.full(6, np.inf),
+            u_min=-np.full(6, 150.0),
+            u_max=np.full(6, 150.0),
+            dq_max=qdot_max * 0.005 * 0.5,
+        )
+
+        X_new, U_new, cost_new, reject_reason = forward_pass_single(
+            env, cost_fn, X, U, Ks, ks,
+            alpha=0.5, limits=limits,
+        )
+
+        assert X_new is not None, f"位置模式 forward_pass 失败: {reject_reason}"
+        assert U_new is not None
+        assert np.all(np.isfinite(X_new)), "X_new 含 NaN/Inf"
+        assert np.all(np.isfinite(U_new)), "U_new 含 NaN/Inf"
+
+
+# ==============================================================================
+#  切片 15：代价函数 R=0
+# ==============================================================================
+
+
+class TestCostPositionMode:
+    """切片 15：位置模式下 R=0，Q_du 正常。"""
+
+    def test_R_zero_in_position_mode(self) -> None:
+        """位置模式 running_cost 中 R*u²=0，力矩模式有 R*u²。"""
+        env = _make_env()
+        env.reset(q0=np.array([0.0, -1.2, 1.8, -0.6, 0.0, 0.0]))
+
+        p_hit = np.array([0.4, -0.3, 1.0])
+        v_hit = np.array([-2.0, 0.0, 1.0])
+        Q_p = np.diag([5000.0, 5000.0, 5000.0])
+        Q_v = np.diag([10.0, 10.0, 10.0])
+        R = 0.01
+
+        from src.ilqt.cost import HittingCost
+
+        cost_torque = HittingCost(env, p_hit, v_hit, Q_p, Q_v, R=R, actuator_mode=0)
+        cost_pos = HittingCost(env, p_hit, v_hit, Q_p, Q_v, R=R, actuator_mode=1)
+
+        x = np.concatenate([np.array([0.0, -1.2, 1.8, -0.6, 0.0, 0.0]), np.zeros(6)])
+        u = np.array([10.0, -5.0, 8.0, -3.0, 2.0, -1.0])
+
+        c_torque = cost_torque.running_cost(x, u, k=None)
+        c_pos = cost_pos.running_cost(x, u, k=None)
+
+        expected_R_cost = 0.5 * R * float(u @ u)
+        assert c_torque >= expected_R_cost * 0.9, \
+            f"力矩模式应有 R*u² 贡献，cost={c_torque:.6f}, R*u²={expected_R_cost:.6f}"
+
+        assert abs(c_pos) < 1e-10, \
+            f"位置模式 R=0 且无其他运行代价，cost 应≈0，实际 cost={c_pos:.6f}"
+
+    def test_R_zero_derivatives_in_position_mode(self) -> None:
+        """位置模式 running_derivatives 中 l_u 和 l_uu 为零矩阵。"""
+        env = _make_env()
+        env.reset(q0=np.array([0.0, -1.2, 1.8, -0.6, 0.0, 0.0]))
+
+        p_hit = np.array([0.4, -0.3, 1.0])
+        v_hit = np.array([-2.0, 0.0, 1.0])
+        Q_p = np.diag([5000.0, 5000.0, 5000.0])
+        Q_v = np.diag([10.0, 10.0, 10.0])
+        R = 0.01
+
+        from src.ilqt.cost import HittingCost
+
+        cost_pos = HittingCost(env, p_hit, v_hit, Q_p, Q_v, R=R, actuator_mode=1)
+        cost_torque = HittingCost(env, p_hit, v_hit, Q_p, Q_v, R=R, actuator_mode=0)
+
+        x = np.concatenate([np.array([0.0, -1.2, 1.8, -0.6, 0.0, 0.0]), np.zeros(6)])
+        u = np.array([10.0, -5.0, 8.0, -3.0, 2.0, -1.0])
+
+        l_x_t, l_u_t, l_xx_t, l_ux_t, l_uu_t = cost_torque.running_derivatives(x, u, k=None)
+        l_x_p, l_u_p, l_xx_p, l_ux_p, l_uu_p = cost_pos.running_derivatives(x, u, k=None)
+
+        np.testing.assert_allclose(l_u_p, 0, atol=1e-15,
+                                   err_msg="位置模式 l_u 应为 0")
+        np.testing.assert_allclose(l_uu_p, 0, atol=1e-15,
+                                   err_msg="位置模式 l_uu 应为 0")
+
+        assert np.linalg.norm(l_u_t) > 1e-6, "力矩模式 l_u 应非零"
+        assert np.linalg.norm(l_uu_t) > 1e-6, "力矩模式 l_uu 应非零"

@@ -160,6 +160,7 @@ def forward_pass_with_linesearch(
     )
     fp_margin = limits.forward_pass_margin if limits is not None else 1.0
     fp_q_tol = limits.forward_pass_q_tol_rad if limits is not None else 0.0
+    actuator_mode = getattr(env, 'actuator_mode', 0)
 
     for alpha in alpha_list:
         X_new = np.zeros_like(X)
@@ -193,6 +194,7 @@ def forward_pass_with_linesearch(
                     skip_qdot='braking', skip_qddot=False,
                     qdot_history=qdot_hist,
                     fp_q_tol=fp_q_tol,
+                    actuator_mode=actuator_mode,
                 )
                 if not ok:
                     valid = False
@@ -273,6 +275,7 @@ def forward_pass_single(
 
     fp_margin = limits.forward_pass_margin if limits is not None else 1.0
     fp_q_tol = limits.forward_pass_q_tol_rad if limits is not None else 0.0
+    actuator_mode = getattr(env, 'actuator_mode', 0)
 
     for alpha_try in alphas_to_try:
         X_new = np.zeros_like(X)
@@ -306,6 +309,7 @@ def forward_pass_single(
                     skip_qdot='braking', skip_qddot=False,
                     qdot_history=qdot_hist,
                     fp_q_tol=fp_q_tol,
+                    actuator_mode=actuator_mode,
                 )
                 if not ok:
                     valid = False

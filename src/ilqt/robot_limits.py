@@ -33,6 +33,7 @@ class RobotLimits:
     qddot_hard_reject: bool = False
     max_tcp_speed: float = float('inf')
     terminal_exempt_steps: int = 20
+    dq_max: np.ndarray | None = None
 
     @classmethod
     def from_config(
@@ -85,6 +86,9 @@ class RobotLimits:
         max_tcp_speed = float(config.get("max_tcp_speed", float('inf')))
         terminal_exempt_steps = int(config.get("terminal_exempt_steps", 20))
 
+        dq_max_fraction = float(config.get("dq_max_fraction", 0.5))
+        dq_max = qdot_max * dt * dq_max_fraction
+
         return cls(
             q_lower=q_lower, q_upper=q_upper,
             qdot_max=qdot_max, qddot_max=qddot_max,
@@ -97,6 +101,7 @@ class RobotLimits:
             qddot_hard_reject=qddot_hard_reject,
             max_tcp_speed=max_tcp_speed,
             terminal_exempt_steps=terminal_exempt_steps,
+            dq_max=dq_max,
         )
 
 
@@ -265,17 +270,18 @@ def check_step_feasibility(
     skip_qdot: bool | str = False,
     skip_qddot: bool = False,
     qdot_history: deque | None = None,
-    fp_q_tol: float = 0.0,          # 前向传递 q 额外容忍 [rad]
+    fp_q_tol: float = 0.0,
+    actuator_mode: int = 0,
 ) -> tuple[bool, str]:
     """检查单步是否满足硬约束。
 
     Args:
-        fp_q_tol: 前向传递中 q 约束的额外容忍 (rad)。仅在 forward_pass 中使用，
-                  执行层始终传 0.0（严格检查）。
+        fp_q_tol: 前向传递中 q 约束的额外容忍 (rad)。
         skip_qdot:
             True:     跳过速度检查
-            False/'hard': 硬拒绝（|qdot| > qdot_max*margin → 拒）
-            'braking': 制动感知（已超速+加速→拒，已超速+减速→允）
+            False/'hard': 硬拒绝
+            'braking': 制动感知
+        actuator_mode: 0=力矩模式(检查 u_min/u_max), 1=位置模式(检查 dq_max)。
 
     Returns:
         (pass, reason)
@@ -321,16 +327,25 @@ def check_step_feasibility(
                     _log_rejection(step, "qdot-braking", j, reason)
                     return False, reason
 
-    # 3. 控制力矩（始终硬拒绝）
-    for j in range(nq):
-        if u_try[j] < limits.u_min[j] * margin:
-            reason = f"u lower bound violated, joint={j}"
-            _log_rejection(step, "u", j, reason)
-            return False, reason
-        if u_try[j] > limits.u_max[j] * margin:
-            reason = f"u upper bound violated, joint={j}"
-            _log_rejection(step, "u", j, reason)
-            return False, reason
+    # 3. 控制量检查（分模式）
+    if actuator_mode == 0:
+        for j in range(nq):
+            if u_try[j] < limits.u_min[j] * margin:
+                reason = f"u lower bound violated, joint={j}"
+                _log_rejection(step, "u", j, reason)
+                return False, reason
+            if u_try[j] > limits.u_max[j] * margin:
+                reason = f"u upper bound violated, joint={j}"
+                _log_rejection(step, "u", j, reason)
+                return False, reason
+    else:
+        if limits.dq_max is not None:
+            for j in range(nq):
+                dq = abs(u_try[j] - x_prev[j])
+                if dq > limits.dq_max[j]:
+                    reason = f"dq limit exceeded, joint={j}, dq={dq:.4f} > {limits.dq_max[j]:.4f}"
+                    _log_rejection(step, "dq", j, reason)
+                    return False, reason
 
     # 4. 关节加速度（Phase1: 审计日志 + 滑窗估算，不硬拒）
     if not skip_qddot and np.isfinite(limits.qddot_max[0]):
@@ -387,6 +402,7 @@ def strict_braking_check(
     dt: float,
     k_hit_remaining: int = 99,
     env=None,
+    actuator_mode: int = 0,
 ) -> tuple[bool, str]:
     """执行层严格制动：q/u 硬拒绝，qdot 严格制动感知，TCP 速度限制。
 
@@ -397,6 +413,7 @@ def strict_braking_check(
     终段豁免 (k_hit ≤ terminal_exempt_steps):
       - 只检查 q/u，不检查 qdot/TCP（击球需要速度）
       - terminal_exempt_steps=0 时全程无豁免
+    actuator_mode: 0=力矩模式(检查 u_min/u_max), 1=位置模式(检查 dq_max)。
     """
     nq = 6
     q_next = x_next[:nq]
@@ -409,11 +426,18 @@ def strict_braking_check(
         if q_next[j] > limits.q_upper[j]:
             return False, f"q upper bound violated, joint={j}"
 
-    for j in range(nq):
-        if u_try[j] < limits.u_min[j]:
-            return False, f"u lower bound violated, joint={j}"
-        if u_try[j] > limits.u_max[j]:
-            return False, f"u upper bound violated, joint={j}"
+    if actuator_mode == 0:
+        for j in range(nq):
+            if u_try[j] < limits.u_min[j]:
+                return False, f"u lower bound violated, joint={j}"
+            if u_try[j] > limits.u_max[j]:
+                return False, f"u upper bound violated, joint={j}"
+    else:
+        if limits.dq_max is not None:
+            for j in range(nq):
+                dq = abs(u_try[j] - x_prev[j])
+                if dq > limits.dq_max[j]:
+                    return False, f"dq limit exceeded, joint={j}, dq={dq:.4f} > {limits.dq_max[j]:.4f}"
 
     if k_hit_remaining <= limits.terminal_exempt_steps:
         return True, ""
@@ -458,7 +482,11 @@ def check_one_step_feasibility(
     env=None,
 ) -> tuple[bool, str]:
     x_next = step_predictor(x_current, u_try)
-    return strict_braking_check(x_current, x_next, u_try, limits, dt, k_hit_remaining, env=env)
+    actuator_mode = getattr(env, 'actuator_mode', 0) if env is not None else 0
+    return strict_braking_check(
+        x_current, x_next, u_try, limits, dt, k_hit_remaining, env=env,
+        actuator_mode=actuator_mode,
+    )
 
 
 def check_limits_on_trajectory(
