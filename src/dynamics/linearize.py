@@ -95,6 +95,9 @@ def linearize_analytical(
     x: np.ndarray,
     u: np.ndarray,
     eps: float = 1e-5,
+    actuator_mode: int = 0,
+    kp: np.ndarray | None = None,
+    kd: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """使用 MuJoCo 解析函数线性化臂动力学。
 
@@ -105,6 +108,16 @@ def linearize_analytical(
       dx/dt = [q̇; M^{-1} * (τ - h(q, q̇))]
     其中 h(q, q̇) = C(q,q̇)*q̇ + g(q)
 
+    力矩模式 (actuator_mode=0):
+      τ = u（直接施加力矩）
+      A_c = [0, I; -M^{-1}*H_q, -M^{-1}*H_qdot]
+      B_c = [0; M^{-1}]
+
+    位置模式 (actuator_mode=1):
+      τ = Kp*(u - q) - Kd*qdot（PD 位置控制）
+      A_c = [0, I; -M^{-1}*(H_q + diag(Kp)), -M^{-1}*(H_qdot + diag(Kd))]
+      B_c = [0; M^{-1}*diag(Kp)]
+
     方法：
     1. mj_fullM 一次求 M（解析质量矩阵）
     2. mj_rne 多次求 h 和其偏导数 H_q, H_q̇（中心差分）
@@ -113,8 +126,11 @@ def linearize_analytical(
     Args:
         env: MuJoCo 环境实例。
         x: 当前臂状态 [q; q̇]，形状 (12,)。
-        u: 当前控制力矩 τ，形状 (6,)。
+        u: 当前控制，形状 (6,)。力矩模式为力矩，位置模式为期望角度。
         eps: 有限差分步长（仅用于计算 h 的偏导）。
+        actuator_mode: 0=力矩模式, 1=位置模式。
+        kp: 位置模式比例增益 (6,)。位置模式时必填。
+        kd: 位置模式微分增益 (6,)。位置模式时必填。
 
     Returns:
         (A, B, x_next): A (12,12), B (12,6), x_next (12,)。
@@ -194,17 +210,27 @@ def linearize_analytical(
     data.qvel[:nv] = qdot_orig
     mujoco.mj_forward(model, data)
 
-    # ---- 5. 组装连续时间 A_c, B_c ----
-    # dx/dt = [qdot; M^{-1}*(tau - h(q, qdot))]
-    # A_c = [0, I; -M^{-1}*H_q, -M^{-1}*H_qdot]
-    # B_c = [0; M^{-1}]
+    # ---- 5. 组装连续时间 A_c, B_c（分模式） ----
+    # 公共部分：A_c = [0, I; -M^{-1}*H_q, -M^{-1}*H_qdot]
     A_c = np.zeros((n_x, n_x))
     A_c[:nv, nv:] = np.eye(nv)
     A_c[nv:, :nv] = -M_inv @ H_q
     A_c[nv:, nv:] = -M_inv @ H_qdot
 
     B_c = np.zeros((n_x, n_u))
-    B_c[nv:, :] = M_inv
+    if actuator_mode == 0:
+        # 力矩模式: B_c = [0; M^{-1}]
+        B_c[nv:, :] = M_inv
+    else:
+        # 位置模式:
+        #   B_c = [0; M^{-1}*diag(Kp)]
+        #   A_c 额外: -M^{-1}*diag(Kp) → A_c[nv:, :nv]
+        #   A_c 额外: -M^{-1}*diag(Kd) → A_c[nv:, nv:]
+        kp_row = kp[np.newaxis, :]  # (1, 6) 广播
+        kd_row = kd[np.newaxis, :]
+        B_c[nv:, :] = M_inv * kp_row
+        A_c[nv:, :nv] -= M_inv * kp_row
+        A_c[nv:, nv:] -= M_inv * kd_row
 
     # ---- 6. 欧拉法离散化 ----
     A = np.eye(n_x) + A_c * dt
@@ -221,6 +247,9 @@ def linearize_analytical_trajectory(
     X: np.ndarray,
     U: np.ndarray,
     eps: float = 1e-5,
+    actuator_mode: int = 0,
+    kp: np.ndarray | None = None,
+    kd: np.ndarray | None = None,
 ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
     """沿整条轨迹线性化动力学（解析法）。
 
@@ -229,6 +258,9 @@ def linearize_analytical_trajectory(
         X: 状态轨迹，形状 (N+1, 12)。
         U: 控制轨迹，形状 (N, 6)。
         eps: 有限差分步长（仅用于 h 的偏导）。
+        actuator_mode: 0=力矩模式, 1=位置模式。
+        kp: 位置模式比例增益 (6,)。
+        kd: 位置模式微分增益 (6,)。
 
     Returns:
         (As, Bs, fs): 每步的 A_k, B_k, f_k 列表，各长度 N。
@@ -239,7 +271,10 @@ def linearize_analytical_trajectory(
     fs: list[np.ndarray] = []
 
     for k in range(N):
-        A_k, B_k, f_k = linearize_analytical(env, X[k], U[k], eps)
+        A_k, B_k, f_k = linearize_analytical(
+            env, X[k], U[k], eps,
+            actuator_mode=actuator_mode, kp=kp, kd=kd,
+        )
         As.append(A_k)
         Bs.append(B_k)
         fs.append(f_k)
@@ -251,11 +286,20 @@ def linearize_fast_trajectory(
     env: MujocoEnv,
     X: np.ndarray,
     U: np.ndarray,
+    actuator_mode: int = 0,
+    kp: np.ndarray | None = None,
+    kd: np.ndarray | None = None,
 ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
     """沿轨迹快速线性化（仅计算 M^{-1}，跳过 ∂h/∂q 和 ∂h/∂qdot 有限差分）。
 
-    A 近似为 [I, dt*I; 0, I]（忽略重力和科氏力对 A 的影响），
-    B = [0; dt*M^{-1}]（使用解析质量矩阵）。
+    力矩模式:
+      A ≈ [I, dt*I; 0, I]
+      B = [0; dt*M^{-1}]
+
+    位置模式:
+      A ≈ [I, dt*I; -dt*M^{-1}*diag(Kp), I - dt*M^{-1}*diag(Kd)]
+      B = [0; dt*M^{-1}*diag(Kp)]
+
     f 通过完整动力学 step_from_state 计算，保证前向传递精度。
 
     适用于 far 阶段 MPC 重规划：线性模型精度较低但计算速度约快 10×。
@@ -264,6 +308,9 @@ def linearize_fast_trajectory(
         env: MuJoCo 环境实例。
         X: 状态轨迹，形状 (N+1, 12)。
         U: 控制轨迹，形状 (N, 6)。
+        actuator_mode: 0=力矩模式, 1=位置模式。
+        kp: 位置模式比例增益 (6,)。
+        kd: 位置模式微分增益 (6,)。
 
     Returns:
         (As, Bs, fs): 每步的 A_k, B_k, f_k 列表，各长度 N。
@@ -292,6 +339,13 @@ def linearize_fast_trajectory(
 
         B_k = np.zeros((n_x, n_u))
         B_k[nv:, :] = dt * M_inv
+
+        if actuator_mode == 1:
+            kp_row = kp[np.newaxis, :]
+            kd_row = kd[np.newaxis, :]
+            A_k[nv:, :nv] -= dt * M_inv * kp_row
+            A_k[nv:, nv:] -= dt * M_inv * kd_row
+            B_k[nv:, :] = dt * M_inv * kp_row
 
         f_k = env.step_from_state(X[k], U[k])
 

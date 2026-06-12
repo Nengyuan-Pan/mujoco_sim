@@ -106,6 +106,16 @@ robot_limits:
   # TCP 线速度硬限制 (m/s)
   max_tcp_speed: 1.8
 
+  # 位置模式下单步角度变化量限制
+  # dq_max = qdot_max * dt * dq_max_fraction（自动计算）
+  dq_max_fraction: 0.5
+
+# 执行器模式配置
+actuator:
+  mode: "torque"             # "torque" 或 "position"
+  kp: [200.0, 200.0, 200.0, 50.0, 50.0, 20.0]
+  kd: [20.0, 20.0, 20.0, 5.0, 5.0, 2.0]
+
 # 可视化参数
 viewer:
   camera_distance: 2.5

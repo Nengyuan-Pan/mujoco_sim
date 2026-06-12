@@ -70,6 +70,15 @@ class RM65Env:
             self._estimator = BallEstimator(self.dt, **estimator_config)
         self._cached_ball_state: tuple[np.ndarray, np.ndarray] | None = None
 
+        # 保存原始力矩模式参数（configure_actuator_mode 切换时恢复用）
+        self._torque_ctrlrange = self.model.actuator_ctrlrange[:self.NU].copy()
+        self._torque_gainprm = self.model.actuator_gainprm[:self.NU].copy()
+        self._torque_biasprm = self.model.actuator_biasprm[:self.NU].copy()
+        self._torque_biastype = self.model.actuator_biastype[:self.NU].copy()
+        self._actuator_mode: int = 0  # 0=力矩, 1=位置
+        self._kp: np.ndarray | None = None
+        self._kd: np.ndarray | None = None
+
     def observe(self) -> tuple[np.ndarray, np.ndarray]:
         """推进观测处理管线：MuJoCo → preprocessor → KF → 缓存。
 
@@ -373,6 +382,84 @@ class RM65Env:
     def dt(self) -> float:
         """仿真时间步长。"""
         return self.model.opt.timestep
+
+    @property
+    def actuator_mode(self) -> int:
+        """执行器模式：0=力矩, 1=位置。"""
+        return self._actuator_mode
+
+    @property
+    def kp(self) -> np.ndarray | None:
+        """位置模式比例增益，形状 (6,)。力矩模式下为 None。"""
+        return self._kp
+
+    @property
+    def kd(self) -> np.ndarray | None:
+        """位置模式速度增益，形状 (6,)。力矩模式下为 None。"""
+        return self._kd
+
+    def configure_actuator_mode(
+        self,
+        mode: str,
+        kp: np.ndarray | None = None,
+        kd: np.ndarray | None = None,
+    ) -> None:
+        """配置执行器模式，修改 MuJoCo model 参数。
+
+        调用后所有后续 step() 和线性化操作都将使用新模式。
+        mj_resetData() 不会恢复此设置。
+
+        Args:
+            mode: "torque" 或 "position"。
+            kp: (6,) 位置增益。position 模式必须提供。
+            kd: (6,) 速度增益。position 模式必须提供。
+        """
+        if mode == "torque":
+            self._actuator_mode = 0
+            self.model.actuator_ctrlrange[:self.NU] = self._torque_ctrlrange
+            self.model.actuator_gainprm[:self.NU] = self._torque_gainprm
+            self.model.actuator_biasprm[:self.NU] = self._torque_biasprm
+            self.model.actuator_biastype[:self.NU] = self._torque_biastype
+            self._kp = None
+            self._kd = None
+
+        elif mode == "position":
+            if kp is None or kd is None:
+                raise ValueError("位置模式必须提供 kp 和 kd")
+            kp = np.asarray(kp, dtype=np.float64).reshape(self.NU)
+            kd = np.asarray(kd, dtype=np.float64).reshape(self.NU)
+            self._actuator_mode = 1
+            self._kp = kp.copy()
+            self._kd = kd.copy()
+
+            for i in range(self.NU):
+                self.model.actuator_gainprm[i, 0] = kp[i]
+                self.model.actuator_biasprm[i, 0] = 0.0
+                self.model.actuator_biasprm[i, 1] = -kp[i]
+                self.model.actuator_biasprm[i, 2] = -kd[i]
+                self.model.actuator_biastype[i] = mujoco.mjtBias.mjBIAS_AFFINE
+                jnt_id = self.model.actuator_trnid[i, 0]
+                self.model.actuator_ctrlrange[i] = self.model.jnt_range[jnt_id]
+
+            for i in range(self.NU):
+                actual = self.model.actuator_gainprm[i, 0]
+                assert abs(actual - kp[i]) < 1e-10, \
+                    f"执行器 {i} gain 写入失败: expected {kp[i]}, got {actual}"
+        else:
+            raise ValueError(f"未知执行器模式: {mode}")
+
+    def clone_actuator_config(self, target_env: "RM65Env") -> None:
+        """将当前 env 的执行器配置复制到目标 env。
+
+        用于异步规划中同步 env_plan 的执行器配置。
+
+        Args:
+            target_env: 目标环境实例。
+        """
+        if self._actuator_mode == 0:
+            target_env.configure_actuator_mode("torque")
+        else:
+            target_env.configure_actuator_mode("position", self._kp, self._kd)
 
     def step_full(self, u: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """施加控制力矩并前进一步，返回右臂状态和球状态。
