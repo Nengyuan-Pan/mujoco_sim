@@ -48,7 +48,13 @@ class ILQTSolver:
                    ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
         """根据配置选择线性化方法。"""
         if self.use_analytical:
-            return linearize_analytical_trajectory(env, X, U, self.lin_eps)
+            actuator_mode = getattr(env, 'actuator_mode', 0)
+            kp = getattr(env, 'kp', None)
+            kd = getattr(env, 'kd', None)
+            return linearize_analytical_trajectory(
+                env, X, U, self.lin_eps,
+                actuator_mode=actuator_mode, kp=kp, kd=kd,
+            )
         return linearize_trajectory(env, X, U, self.lin_eps)
 
     def solve(
@@ -298,7 +304,12 @@ class ILQTSolver:
     ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
         """快速线性化（仅 M^{-1}，跳过 ∂h/∂q, ∂h/∂qdot 有限差分）。"""
         from src.dynamics.linearize import linearize_fast_trajectory
-        return linearize_fast_trajectory(env, X, U)
+        actuator_mode = getattr(env, 'actuator_mode', 0)
+        kp = getattr(env, 'kp', None)
+        kd = getattr(env, 'kd', None)
+        return linearize_fast_trajectory(
+            env, X, U, actuator_mode=actuator_mode, kp=kp, kd=kd,
+        )
 
     def _backward_pass(
         self,

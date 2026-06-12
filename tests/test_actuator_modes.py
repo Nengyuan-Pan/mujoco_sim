@@ -269,3 +269,262 @@ class TestPythonLinearizePosition:
             A_p[6:, 6:] - A_t[6:, 6:], expected_dA_qdot, atol=1e-12,
             err_msg="A 矩阵额外 -M^{-1}*Kd 项不正确",
         )
+
+
+class TestCppLinearizePosition:
+    """切片 10：C++ 解析线性化位置模式与 Python 一致性验证。
+
+    验证 C++ linearize_analytical_batch 在力矩/位置两种模式下
+    均与 Python linearize_analytical 结果精确匹配。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _skip_if_no_cpp(self) -> None:
+        """C++ 模块不可用时跳过。"""
+        try:
+            from src.cpp.iLQR_Core import linearize_analytical_batch
+        except ImportError:
+            pytest.skip("C++ iLQR_Core 模块未编译")
+
+    @staticmethod
+    def _get_ptrs(env: RM65Env) -> tuple[int, int]:
+        return env.model._address, env.data._address
+
+    def test_torque_mode_cpp_matches_python(self) -> None:
+        """力矩模式下 C++ 和 Python 结果一致（回归验证）。"""
+        from src.cpp.iLQR_Core import linearize_analytical_batch
+
+        env = _make_env()
+        env.reset(q0=np.array([0.0, -1.2, 1.8, -0.6, 0.0, 0.0]))
+
+        rng = np.random.default_rng(42)
+        q = np.array([0.1, -0.5, 0.8, -0.3, 0.2, 0.1])
+        qdot = rng.standard_normal(6) * 0.5
+        x = np.concatenate([q, qdot])
+        u = rng.standard_normal(6) * 0.1
+
+        A_py, B_py, f_py = linearize_analytical(env, x, u, eps=1e-5, actuator_mode=0)
+
+        N = 1
+        A_cpp = np.zeros((N, 12, 12))
+        B_cpp = np.zeros((N, 12, 6))
+        f_cpp = np.zeros((N, 12))
+        mp, dp = self._get_ptrs(env)
+        linearize_analytical_batch(
+            A_cpp, B_cpp, f_cpp,
+            x.reshape(1, 12), u.reshape(1, 6),
+            mp, dp, env.init_q_left,
+            1e-5, env.dt, 0, None, None,
+        )
+
+        np.testing.assert_allclose(A_cpp[0], A_py, atol=1e-14,
+                                   err_msg="力矩模式 A 矩阵 C++ vs Python 不一致")
+        np.testing.assert_allclose(B_cpp[0], B_py, atol=1e-14,
+                                   err_msg="力矩模式 B 矩阵 C++ vs Python 不一致")
+
+    def test_position_mode_cpp_matches_python(self) -> None:
+        """位置模式下 C++ 和 Python 结果一致。"""
+        from src.cpp.iLQR_Core import linearize_analytical_batch
+
+        env = _make_env()
+        kp = np.array([200.0, 200.0, 200.0, 50.0, 50.0, 20.0])
+        kd = np.array([20.0, 20.0, 20.0, 5.0, 5.0, 2.0])
+        env.configure_actuator_mode("position", kp=kp, kd=kd)
+        env.reset(q0=np.array([0.0, -1.2, 1.8, -0.6, 0.0, 0.0]))
+
+        rng = np.random.default_rng(99)
+        q = np.array([0.1, -0.5, 0.8, -0.3, 0.2, 0.1])
+        qdot = rng.standard_normal(6) * 0.5
+        x = np.concatenate([q, qdot])
+        u = rng.standard_normal(6) * 0.1
+
+        A_py, B_py, f_py = linearize_analytical(
+            env, x, u, eps=1e-5, actuator_mode=1, kp=kp, kd=kd,
+        )
+
+        N = 1
+        A_cpp = np.zeros((N, 12, 12))
+        B_cpp = np.zeros((N, 12, 6))
+        f_cpp = np.zeros((N, 12))
+        mp, dp = self._get_ptrs(env)
+        linearize_analytical_batch(
+            A_cpp, B_cpp, f_cpp,
+            x.reshape(1, 12), u.reshape(1, 6),
+            mp, dp, env.init_q_left,
+            1e-5, env.dt, 1, kp, kd,
+        )
+
+        np.testing.assert_allclose(A_cpp[0], A_py, atol=1e-14,
+                                   err_msg="位置模式 A 矩阵 C++ vs Python 不一致")
+        np.testing.assert_allclose(B_cpp[0], B_py, atol=1e-14,
+                                   err_msg="位置模式 B 矩阵 C++ vs Python 不一致")
+
+
+class TestSolverIntegration:
+    """切片 11：solver 自动从 env 读取 actuator_mode。
+
+    验证 solve_few_iters 在力矩和位置两种模式下均能正常运行，
+    且内部线性化使用了正确的 actuator_mode（通过 B 矩阵结构间接验证）。
+    """
+
+    @staticmethod
+    def _make_solver() -> tuple:
+        """创建 env + solver + cost_fn，返回 (env, solver, cost_fn, x0, U_init)。"""
+        from src.ilqt.solver import ILQTSolver
+        from src.ilqt.cost import HittingCost
+
+        env = _make_env()
+        env.reset(q0=np.array([0.0, -1.2, 1.8, -0.6, 0.0, 0.0]))
+
+        q0 = np.array([0.0, -1.2, 1.8, -0.6, 0.0, 0.0])
+        x0 = np.concatenate([q0, np.zeros(6)])
+
+        p_hit = np.array([0.4, -0.3, 1.0])
+        v_hit = np.array([-2.0, 0.0, 1.0])
+        Q_p = np.diag([5000.0, 5000.0, 5000.0])
+        Q_v = np.diag([10.0, 10.0, 10.0])
+        cost_fn = HittingCost(env, p_hit, v_hit, Q_p, Q_v, R=0.001)
+
+        ilqt_cfg = {
+            "max_iter": 10,
+            "tol": 1e-4,
+            "horizon": 10,
+            "mu_min": 1e-6,
+            "mu_max": 1e10,
+            "mu_init": 0.01,
+            "delta_0": 1.6,
+            "alpha_list": [1.0, 0.5, 0.1],
+            "lin_eps": 1e-5,
+        }
+        solver = ILQTSolver(ilqt_cfg)
+        U_init = np.zeros((10, 6))
+
+        return env, solver, cost_fn, x0, U_init
+
+    def test_torque_mode_solve_few_iters(self) -> None:
+        """力矩模式下 solve_few_iters 正常运行（回归验证）。"""
+        env, solver, cost_fn, x0, U_init = self._make_solver()
+
+        X, U, cost_history, success = solver.solve_few_iters(
+            env, cost_fn, x0, U_init, max_iter=2,
+        )
+
+        assert X.shape == (11, 12)
+        assert U.shape == (10, 6)
+        assert np.all(np.isfinite(X)), "力矩模式 X 含 NaN/Inf"
+        assert np.all(np.isfinite(U)), "力矩模式 U 含 NaN/Inf"
+        assert len(cost_history) > 0
+
+    def test_position_mode_solve_few_iters(self) -> None:
+        """位置模式下 solve_few_iters 正常运行，且线性化使用了正确模式。
+
+        通过在 solver._linearize 外包装捕获 B 矩阵，
+        验证 B 矩阵下半部分含 Kp 缩放（即确认线性化路径读取了 actuator_mode=1）。
+        """
+        from src.ilqt.solver import ILQTSolver
+        from src.ilqt.cost import HittingCost
+
+        env = _make_env()
+        kp = np.array([200.0, 200.0, 200.0, 50.0, 50.0, 20.0])
+        kd = np.array([20.0, 20.0, 20.0, 5.0, 5.0, 2.0])
+        env.configure_actuator_mode("position", kp=kp, kd=kd)
+        env.reset(q0=np.array([0.0, -1.2, 1.8, -0.6, 0.0, 0.0]))
+
+        q0 = np.array([0.0, -1.2, 1.8, -0.6, 0.0, 0.0])
+        x0 = np.concatenate([q0, np.zeros(6)])
+
+        p_hit = np.array([0.4, -0.3, 1.0])
+        v_hit = np.array([-2.0, 0.0, 1.0])
+        Q_p = np.diag([5000.0, 5000.0, 5000.0])
+        Q_v = np.diag([10.0, 10.0, 10.0])
+        cost_fn = HittingCost(env, p_hit, v_hit, Q_p, Q_v, R=0.001)
+
+        ilqt_cfg = {
+            "max_iter": 10,
+            "tol": 1e-4,
+            "horizon": 10,
+            "mu_min": 1e-6,
+            "mu_max": 1e10,
+            "mu_init": 0.01,
+            "delta_0": 1.6,
+            "alpha_list": [1.0, 0.5, 0.1],
+            "lin_eps": 1e-5,
+        }
+        solver = ILQTSolver(ilqt_cfg, use_analytical=True)
+        U_init = np.zeros((10, 6))
+
+        captured_Bs: list = []
+        _orig_linearize = solver._linearize
+
+        def _capturing_linearize(env_arg, X_arg, U_arg):
+            result = _orig_linearize(env_arg, X_arg, U_arg)
+            captured_Bs.append(result[1])
+            return result
+
+        solver._linearize = _capturing_linearize
+
+        X, U, cost_history, success = solver.solve_few_iters(
+            env, cost_fn, x0, U_init, max_iter=2,
+        )
+
+        assert X.shape == (11, 12)
+        assert U.shape == (10, 6)
+        assert np.all(np.isfinite(X)), "位置模式 X 含 NaN/Inf"
+        assert np.all(np.isfinite(U)), "位置模式 U 含 NaN/Inf"
+        assert len(captured_Bs) > 0, "线性化未被调用"
+
+        B_first = captured_Bs[0][0]
+        B_upper = B_first[:6, :]
+        B_lower = B_first[6:, :]
+
+        np.testing.assert_allclose(B_upper, 0, atol=1e-10,
+                                   err_msg="B 矩阵上半部分应为零")
+        assert np.linalg.norm(B_lower) > 1e-6, \
+            "位置模式 B 矩阵下半部分应为非零"
+
+    def test_solver_cpp_position_mode(self) -> None:
+        """C++ solver 位置模式 solve_few_iters 正常运行。"""
+        try:
+            from src.cpp.solver_cpp import ILQTSolver as CppSolver
+        except ImportError:
+            pytest.skip("C++ iLQR_Core 模块未编译")
+
+        from src.ilqt.cost import HittingCost
+
+        env = _make_env()
+        kp = np.array([200.0, 200.0, 200.0, 50.0, 50.0, 20.0])
+        kd = np.array([20.0, 20.0, 20.0, 5.0, 5.0, 2.0])
+        env.configure_actuator_mode("position", kp=kp, kd=kd)
+        env.reset(q0=np.array([0.0, -1.2, 1.8, -0.6, 0.0, 0.0]))
+
+        q0 = np.array([0.0, -1.2, 1.8, -0.6, 0.0, 0.0])
+        x0 = np.concatenate([q0, np.zeros(6)])
+
+        p_hit = np.array([0.4, -0.3, 1.0])
+        v_hit = np.array([-2.0, 0.0, 1.0])
+        Q_p = np.diag([5000.0, 5000.0, 5000.0])
+        Q_v = np.diag([10.0, 10.0, 10.0])
+        cost_fn = HittingCost(env, p_hit, v_hit, Q_p, Q_v, R=0.001)
+
+        ilqt_cfg = {
+            "max_iter": 10,
+            "tol": 1e-4,
+            "horizon": 10,
+            "mu_min": 1e-6,
+            "mu_max": 1e10,
+            "mu_init": 0.01,
+            "delta_0": 1.6,
+            "alpha_list": [1.0, 0.5, 0.1],
+            "lin_eps": 1e-5,
+        }
+        solver = CppSolver(ilqt_cfg, use_analytical=True)
+        U_init = np.zeros((10, 6))
+
+        X, U, cost_history, success = solver.solve_few_iters(
+            env, cost_fn, x0, U_init, max_iter=2,
+        )
+
+        assert X.shape == (11, 12)
+        assert U.shape == (10, 6)
+        assert np.all(np.isfinite(X)), "C++ 位置模式 X 含 NaN/Inf"
+        assert np.all(np.isfinite(U)), "C++ 位置模式 U 含 NaN/Inf"

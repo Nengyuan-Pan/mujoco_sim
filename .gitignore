@@ -20,6 +20,7 @@ plans/
 .codegraph/
 *.mp4
 *.avi
+src/cpp/*.so
 
 memory.md
 scripts/test/test_noise_integration.py

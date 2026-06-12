@@ -98,13 +98,24 @@ else:
             if self.use_analytical and _CPP_AVAILABLE:
                 return self._linearize_cpp(env, X, U)
             if self.use_analytical:
-                return linearize_analytical_trajectory(env, X, U, self.lin_eps)
+                actuator_mode = getattr(env, 'actuator_mode', 0)
+                kp = getattr(env, 'kp', None)
+                kd = getattr(env, 'kd', None)
+                return linearize_analytical_trajectory(
+                    env, X, U, self.lin_eps,
+                    actuator_mode=actuator_mode, kp=kp, kd=kd,
+                )
             return linearize_trajectory(env, X, U, self.lin_eps)
 
         def _linearize_fast(self, env, X, U):
             """快速线性化（仅 M^{-1}，跳过 ∂h/∂q, ∂h/∂qdot 有限差分）。"""
             from src.dynamics.linearize import linearize_fast_trajectory
-            return linearize_fast_trajectory(env, X, U)
+            actuator_mode = getattr(env, 'actuator_mode', 0)
+            kp = getattr(env, 'kp', None)
+            kd = getattr(env, 'kd', None)
+            return linearize_fast_trajectory(
+                env, X, U, actuator_mode=actuator_mode, kp=kp, kd=kd,
+            )
 
         def _linearize_cpp(self, env, X, U):
             """C++ 加速的解析线性化。"""
@@ -112,11 +123,15 @@ else:
             A_all = np.zeros((N, 12, 12))
             B_all = np.zeros((N, 12, 6))
             x_next_all = np.zeros((N, 12))
+            actuator_mode = getattr(env, 'actuator_mode', 0)
+            kp = getattr(env, 'kp', None)
+            kd = getattr(env, 'kd', None)
             linearize_analytical_batch(
                 A_all, B_all, x_next_all, X, U,
-            _get_model_ptr(env.model), _get_model_ptr(env.data),
+                _get_model_ptr(env.model), _get_model_ptr(env.data),
                 env.init_q_left,
                 self.lin_eps, env.dt,
+                actuator_mode, kp, kd,
             )
             As = [A_all[k] for k in range(N)]
             Bs = [B_all[k] for k in range(N)]

@@ -11,7 +11,9 @@ void linearize_analytical_batch(
     py::array_t<double> X_a, py::array_t<double> U_a,
     uintptr_t model_ptr, uintptr_t data_ptr,
     const double* init_q_left,
-    double eps, double dt)
+    double eps, double dt,
+    int actuator_mode,
+    const double* kp, const double* kd)
 {
     mjModel* m = to_model(model_ptr);
     mjData* d = to_data(data_ptr);
@@ -29,6 +31,7 @@ void linearize_analytical_batch(
             X + k * kNX, U + k * kNU,
             init_q_left,
             eps, dt,
+            actuator_mode, kp, kd,
             A_all + k * kNX * kNX,
             B_all + k * kNX * kNU,
             x_next_all + k * kNX);
@@ -45,18 +48,31 @@ PYBIND11_MODULE(iLQR_Core, m) {
            py::array_t<double> X, py::array_t<double> U,
            uintptr_t model_ptr, uintptr_t data_ptr,
            py::array_t<double> init_q_left_a,
-           double eps, double dt)
+           double eps, double dt,
+           int actuator_mode,
+           py::object kp_obj, py::object kd_obj)
         {
+            const double* kp_ptr = nullptr;
+            const double* kd_ptr = nullptr;
+            if (!kp_obj.is_none()) {
+                kp_ptr = py::array_t<double>(kp_obj).data();
+            }
+            if (!kd_obj.is_none()) {
+                kd_ptr = py::array_t<double>(kd_obj).data();
+            }
             linearize_analytical_batch(
                 A_all, B_all, x_next_all, X, U,
                 model_ptr, data_ptr,
-                init_q_left_a.data(), eps, dt);
+                init_q_left_a.data(), eps, dt,
+                actuator_mode, kp_ptr, kd_ptr);
         },
         py::arg("A_all"), py::arg("B_all"), py::arg("x_next_all"),
         py::arg("X"), py::arg("U"),
         py::arg("model_ptr"), py::arg("data_ptr"),
         py::arg("init_q_left"),
         py::arg("eps") = 1e-5, py::arg("dt") = 0.005,
+        py::arg("actuator_mode") = 0,
+        py::arg("kp") = py::none(), py::arg("kd") = py::none(),
         "Batch analytical linearization along trajectory. "
         "Output: A_all(N,12,12), B_all(N,12,6), x_next_all(N,12)");
 

@@ -44,11 +44,16 @@ void invert_6x6(const mjtNum* M, double* M_inv) {
 
 // Single-point analytical linearization
 // A_out: (12,12), B_out: (12,6), x_next_out: (12,)
+//
+// actuator_mode: 0=torque (tau=u), 1=position (tau=Kp*(u-q)-Kd*qdot)
+// kp, kd: (6,) gain arrays, nullptr when actuator_mode==0
 void linearize_analytical_single(
     mjModel* m, mjData* d,
     const double* x, const double* u,
     const double* init_q_left,
     double eps, double dt,
+    int actuator_mode,
+    const double* kp, const double* kd,
     double* A_out, double* B_out, double* x_next_out)
 {
     set_arm_forward(m, d, x, x + kNQ, init_q_left);
@@ -117,11 +122,20 @@ void linearize_analytical_single(
     std::memcpy(d->qvel, qd_save, 6 * sizeof(double));
     mj_forward(m, d);
 
-    // ---- 5. Assemble A_c, B_c ----
+    // ---- 5. Assemble A_c, B_c (mode-dependent) ----
+    //
+    // Torque mode (actuator_mode == 0):
+    //   tau = ctrl
+    //   A_c = [0, I; -M^{-1}*H_q, -M^{-1}*H_qdot]
+    //   B_c = [0; M^{-1}]
+    //
+    // Position mode (actuator_mode == 1):
+    //   tau = Kp*(ctrl - q) - Kd*qdot
+    //   A_c = [0, I; -M^{-1}*(H_q+diag(Kp)), -M^{-1}*(H_qdot+diag(Kd))]
+    //   B_c = [0; M^{-1}*diag(Kp)]
     double A_c[12][12] = {};
     for (int i = 0; i < 6; ++i) A_c[i][6 + i] = 1.0;
 
-    // M_inv_Hq = -M_inv * H_q,  M_inv_Hqdot = -M_inv * H_qdot
     double M_inv_Hq[6][6] = {};
     double M_inv_Hqdot[6][6] = {};
     for (int i = 0; i < 6; ++i) {
@@ -141,10 +155,30 @@ void linearize_analytical_single(
             A_c[6 + i][6 + j]  = M_inv_Hqdot[i][j];
         }
     }
+
     double B_c[12][6] = {};
-    for (int i = 0; i < 6; ++i)
-        for (int j = 0; j < 6; ++j)
-            B_c[6 + i][j] = M_inv[i*6 + j];
+    if (actuator_mode == 0) {
+        // Torque mode: B_c = [0; M^{-1}]
+        for (int i = 0; i < 6; ++i)
+            for (int j = 0; j < 6; ++j)
+                B_c[6 + i][j] = M_inv[i*6 + j];
+    } else {
+        // Safety: kp/kd must be non-null when actuator_mode == 1
+        // (enforced by Python-side configure_actuator_mode())
+        assert(kp && kd);
+        // Position mode:
+        //   B_c[6+i][j] = M_inv[i,j] * Kp[j]   (= M^{-1} * diag(Kp))
+        //   A_c[6+i][j]   += -M_inv[i,j] * Kp[j] (= -M^{-1} * diag(Kp))
+        //   A_c[6+i][6+j] += -M_inv[i,j] * Kd[j] (= -M^{-1} * diag(Kd))
+        for (int i = 0; i < 6; ++i) {
+            for (int j = 0; j < 6; ++j) {
+                double mi = M_inv[i*6 + j];
+                B_c[6 + i][j]      = mi * kp[j];
+                A_c[6 + i][j]     += -mi * kp[j];
+                A_c[6 + i][6 + j] += -mi * kd[j];
+            }
+        }
+    }
 
     // ---- 6. Euler discretization ----
     for (int i = 0; i < 12; ++i) {
