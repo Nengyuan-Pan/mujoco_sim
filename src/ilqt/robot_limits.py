@@ -494,6 +494,7 @@ def check_limits_on_trajectory(
     U: np.ndarray,
     limits: RobotLimits | None,
     dt: float,
+    actuator_mode: int = 0,
 ) -> tuple[bool, int, str]:
     if limits is None:
         return True, -1, ""
@@ -504,6 +505,7 @@ def check_limits_on_trajectory(
             X[k], X[k + 1], U[k], limits, dt, step=k,
             skip_qdot=False, skip_qddot=False,
             qdot_history=qdot_hist,
+            actuator_mode=actuator_mode,
         )
         if not ok:
             return False, k, reason

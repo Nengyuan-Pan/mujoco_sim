@@ -190,6 +190,8 @@ void linearize_analytical_single(
             B_out[i * 6 + j] = B_c[i][j] * dt;
 
     // ---- 7. Baseline next state ----
+    // Note: u[] is assumed pre-clipped to actuator_ctrlrange by the Python caller,
+    // so the x_next computed by mj_step (which clips internally) matches the dynamics.
     set_arm_forward(m, d, x, x + kNQ, init_q_left);
     for (int i = 0; i < kNU; ++i)
         d->ctrl[i] = clip(u[i], -1e10, 1e10);

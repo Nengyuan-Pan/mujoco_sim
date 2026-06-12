@@ -84,6 +84,7 @@ class HittingCost:
             max_tcp_speed: v6 TCP 最大允许速度（用于导数归一化）。
             Q_qdot_limit: v6 关节速度阈值软惩罚权重（0=禁用）。
             qdot_limit_thresholds: v6 各关节速度阈值，形状 (6,)。超过此值开始惩罚。
+            actuator_mode: 执行器模式，0=力矩(默认), 1=位置模式(R=0, 控制代价置零)。
         """
         self.env = env
         self.p_hit = p_hit.copy()
@@ -189,6 +190,10 @@ class HittingCost:
         )
         # 组合权重
         self._rebuild_combined_weight()
+
+        if actuator_mode == 1 and R_schedule is not None:
+            import warnings
+            warnings.warn("位置模式下 R_schedule 被忽略（R=0）", stacklevel=2)
 
     def _rebuild_running_weight(self) -> None:
         """重建运行位置代价权重。"""
