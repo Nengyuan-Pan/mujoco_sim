@@ -7,7 +7,7 @@
 在给定网球飞来轨迹的情况下，计算最优挥拍轨迹，使末端执行器（球拍面）在正确的时间和位置以期望的速度击中网球。
 
 - 状态向量: x = [q(12), qdot(12)] ∈ R^24（双臂关节位置 + 关节速度）; 球自由关节另计
-- 控制向量: u = tau(6) ∈ R^6（仅驱动右臂，左臂保持零位）
+- 控制向量: u = tau(6) ∈ R^6（力矩模式，默认）；或 u = q_desired(6)（位置模式，--position-mode）
 - 末端执行器: 球拍面中心点（racket_center site）
 - 实际关节: r_joint1~r_joint6（右臂）+ l_joint1~l_joint6（左臂）
 - MuJoCo 模型: nq=19(双臂 12+球 7), nv=18(双臂 12+球 6), nu=12(右臂 motor 6 + 左臂 motor 6)
@@ -106,6 +106,7 @@ mujoco_sim/
 │   │   ├── robot_limits.py            # 关节约束 + 安全滤波（RobotLimits, strict_braking_check）
 │   │   ├── retiming.py                # 时间重映射工具
 │   │   ├── async_replanner.py         # 异步重规划器（后台线程 iLQR）
+│   │   ├── jt_init.py                 # 位置模式 JT 初始控制 + 后摆 warm-start
 │   │   └── costs/                     # 模块化代价函数
 │   │       ├── __init__.py
 │   │       ├── base.py                # BaseCost 基类
@@ -176,7 +177,8 @@ mujoco_sim/
 │   ├── test_ball.py
 │   ├── test_noise.py
 │   ├── test_ball_estimator.py              # BallEstimator 单元+集成测试（16 tests）
-│   └── test_estimator_pipeline.py          # 感知 pipeline 端到端测试（7 tests）
+│   ├── test_estimator_pipeline.py          # 感知 pipeline 端到端测试（7 tests）
+│   └── test_actuator_modes.py              # 双模式执行器测试（31 tests）
 ├── experiment_data/                  # 实验数据（按 exp1~exp8 组织）
 │   └── README.md                     # 数据存储规范
 ├── paper/                            # 论文 LaTeX 工程
@@ -246,7 +248,15 @@ mujoco_sim/
 - **TCP 速度硬限制**：max_tcp_speed = 1.8 m/s
 - **逐步安全滤波**：β = [0.8, 0.6, 0.4, 0.2, 0.0]，找到最大可行控制
 - **终段豁免**：击球前 terminal_exempt_steps 步跳过速度检查（默认 20 步）
-- **紧急制动**：所有 β 均失败时施加阻尼力矩 u = -20·qdot
+- **紧急制动**：所有 β 均失败时施加阻尼力矩 u = -20·qdot（力矩模式）；保持当前角度（位置模式）
+
+### 双模式执行器（Stage -1，已集成至 V11）
+- **力矩模式（默认）**：`u = tau`，MuJoCo `actuator` 直接输出力矩到关节。B 矩阵下半块 = `dt * M^{-1}`
+- **位置模式（`--position-mode`）**：`u = q_desired`，MuJoCo `general` 执行器内部 PD 闭环 `tau = Kp*(u - q) - Kd*qdot`。B 矩阵下半块 = `dt * M^{-1} * diag(Kp)`，A 矩阵含额外 `-M^{-1}*Kp` 和 `-M^{-1}*Kd` 项
+- `configs/default.yaml` 中 `actuator` 节管理 `kp`/`kd` 参数，V11 通过 `env.configure_actuator_mode("position", kp, kd)` 动态切换
+- **beta 缩放→位置插值**：力矩模式 `beta * u` 缩放控制量 → 位置模式 `q + beta*(u - q)` 插值（beta=0 保持当前角度）
+- **随挥 IK**：位置模式用 `env.solve_ik()` 替代力矩模式的 `J^T*F` PD 控制器
+- **TCP 速度检查（位置模式）**：用 `step_from_state` 预测 + 位置插值限速（替代力矩模式的直接缩放）
 
 ### 动力学线性化
 - 通过 MuJoCo 的 `mj_jac` 和 `mj_rne` 计算雅可比和动力学偏导
@@ -321,7 +331,8 @@ mujoco_sim/
 - 激活环境: `conda activate mujoco_tennis`
 - 安装依赖: `pip install -r requirements.txt`
 - 编译 C++ 扩展: `python setup.py build_ext --inplace`
-- 运行 MPC 仿真（当前活跃版本）: `python scripts/rm65_mpc_tube_constraint_realtime_v5.py --serve-box --ball-speed 7`
+- 运行 MPC 仿真（当前活跃版本）: `python scripts/rm65_mpc_v11.py --serve-box --ball-speed 7`
+- 位置模式仿真: `python scripts/rm65_mpc_v11.py --serve-box --ball-speed 7 --position-mode`
 - 离线测试: `python scripts/rm65_mpc_tube_constraint.py --serve-box --ball-speed 9`
 - 关节安全扫描: `python scripts/scan_joint_safety.py`
 - 运行测试: `pytest tests/`
@@ -413,7 +424,7 @@ mujoco_sim/
 | 脚本 | 用途 | 关键特性 |
 |------|------|---------|
 | `scripts/rm65_mpc_tube_constraint.py` | 离线仿真主脚本 | MPC+iLQR+Tube+硬约束+X平面墙 |
-| `scripts/rm65_mpc_v11.py` | ★ 最新版本（V11） | V9 基础 + X平面墙修复 + sigmoid 权重调度 + 远段轻量 iLQR |
+| `scripts/rm65_mpc_v11.py` | ★ 最新版本（V11） | V9 基础 + X平面墙修复 + sigmoid 权重调度 + 远段轻量 iLQR + `--position-mode` 双模式 |
 | `scripts/rm65_mpc_v10.py` | V10 仿真主脚本 | V9 去随挥 + 40cm 终端偏移，用于消融对比 |
 | `scripts/rm65_mpc_v9.py` | V9 仿真主脚本 | 解耦 Tube 走廊 + Softmin 终端，`--ablation` 消融模式 |
 | `scripts/rm65_mpc_v8.py` | V8 仿真主脚本 | 解耦 Tube 走廊 + Softmin 终端，`--no-tube`/`--no-softmin` |
