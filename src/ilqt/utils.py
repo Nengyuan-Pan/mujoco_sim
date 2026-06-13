@@ -356,3 +356,31 @@ def _log_trajectory_metrics(
         m.mean_qddot_ratio_100ms, m.qddot_peak_before_hit,
         m.max_joint_speed_rad_s, m.tcp_speed_max, m.racket_face_speed_max,
     )
+
+
+def apply_control_beta(
+    u: np.ndarray,
+    q: np.ndarray,
+    beta: float,
+    is_position: bool,
+) -> np.ndarray:
+    """对控制量施加 beta 缩放（力矩/位置模式兼容）。
+
+    力矩模式: u_out = beta * u（线性缩放控制量）
+    位置模式: u_out = q + beta * (u - q)（向目标角度插值）
+
+    beta=0: 力矩模式 → 零力矩; 位置模式 → 保持当前角度
+    beta=1: 力矩模式 → 完整力矩; 位置模式 → 设置目标角度
+
+    Args:
+        u: 控制量 (NU,) — 力矩模式下为 tau，位置模式下为 q_desired。
+        q: 当前关节角度 (NU,) — 仅位置模式使用。
+        beta: 缩放系数 ∈ [0, 1]。
+        is_position: 是否为位置模式。
+
+    Returns:
+        缩放后的控制量 (NU,)。
+    """
+    if is_position:
+        return q + beta * (u - q)
+    return beta * u

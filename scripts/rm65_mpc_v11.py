@@ -44,6 +44,7 @@ from src.tennis.hitting import (
     find_hitting_point_physics,
 )
 from src.ilqt.cost import HittingCost
+from src.ilqt.utils import apply_control_beta
 from src.ilqt.robot_limits import (
     RobotLimits,
     check_one_step_feasibility,
@@ -3406,10 +3407,7 @@ def main() -> None:
         beta_list_x = [1.0, 0.6, 0.3, 0.0]
         u_xsafe = u_cmd
         for beta_x in beta_list_x:
-            if is_position_mode:
-                u_try_x = x_current[:env.NQ] + beta_x * (u_cmd - x_current[:env.NQ])
-            else:
-                u_try_x = beta_x * u_cmd
+            u_try_x = apply_control_beta(u_cmd, x_current[:env.NQ], beta_x, is_position_mode)
             ctrl_lo = env.model.actuator_ctrlrange[:env.NU, 0]
             ctrl_hi = env.model.actuator_ctrlrange[:env.NU, 1]
             u_try_x = np.clip(u_try_x, ctrl_lo, ctrl_hi)
@@ -3448,10 +3446,7 @@ def main() -> None:
             safety_beta_list = [0.8, 0.6, 0.4, 0.2, 0.0]
             found_safe = False
             for beta_s in safety_beta_list:
-                if is_position_mode:
-                    u_try_s = x_current[:env.NQ] + beta_s * (u_xsafe - x_current[:env.NQ])
-                else:
-                    u_try_s = beta_s * u_xsafe
+                u_try_s = apply_control_beta(u_xsafe, x_current[:env.NQ], beta_s, is_position_mode)
                 u_try_s = np.clip(u_try_s, ctrl_lo, ctrl_hi)
                 if fix_joint5_angle is not None:
                     u_try_s = _fix_joint5_single_dispatch(u_try_s, fix_joint5_angle, x_current, env.NQ, env)
@@ -3673,10 +3668,7 @@ def main() -> None:
                 ball_save_ft = env.get_ball_state()
                 x_save_ft = x_current.copy()
                 for beta_ft in [1.0, 0.6, 0.3, 0.0]:
-                    if is_position_mode:
-                        u_try_ft = x_current[:env.NQ] + beta_ft * (u_follow - x_current[:env.NQ])
-                    else:
-                        u_try_ft = beta_ft * u_follow
+                    u_try_ft = apply_control_beta(u_follow, x_current[:env.NQ], beta_ft, is_position_mode)
                     u_try_ft = np.clip(u_try_ft,
                                        env.model.actuator_ctrlrange[:env.NU, 0],
                                        env.model.actuator_ctrlrange[:env.NU, 1])
