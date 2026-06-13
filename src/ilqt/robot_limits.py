@@ -339,13 +339,9 @@ def check_step_feasibility(
                 _log_rejection(step, "u", j, reason)
                 return False, reason
     else:
-        if limits.dq_max is not None:
-            for j in range(nq):
-                dq = abs(u_try[j] - x_prev[j])
-                if dq > limits.dq_max[j]:
-                    reason = f"dq limit exceeded, joint={j}, dq={dq:.4f} > {limits.dq_max[j]:.4f}"
-                    _log_rejection(step, "dq", j, reason)
-                    return False, reason
+        # 位置模式：不检查 dq_max（|u-q| 是位置误差，是产生力矩的必要条件）。
+        # 实际运动安全由 qdot 检查（步骤2）和 forcerange（env 层）覆盖。
+        pass
 
     # 4. 关节加速度（Phase1: 审计日志 + 滑窗估算，不硬拒）
     if not skip_qddot and np.isfinite(limits.qddot_max[0]):
@@ -433,11 +429,8 @@ def strict_braking_check(
             if u_try[j] > limits.u_max[j]:
                 return False, f"u upper bound violated, joint={j}"
     else:
-        if limits.dq_max is not None:
-            for j in range(nq):
-                dq = abs(u_try[j] - x_prev[j])
-                if dq > limits.dq_max[j]:
-                    return False, f"dq limit exceeded, joint={j}, dq={dq:.4f} > {limits.dq_max[j]:.4f}"
+        # 位置模式：不检查 dq_max，由 qdot 检查和 forcerange 覆盖
+        pass
 
     if k_hit_remaining <= limits.terminal_exempt_steps:
         return True, ""

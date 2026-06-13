@@ -557,10 +557,11 @@ class TestSafetyPositionMode:
             dq_max=qdot_max * dt * dq_max_fraction,
         )
 
-    def test_check_step_uses_dq_max_in_position_mode(self) -> None:
-        """位置模式 check_step_feasibility 检查 |u-q| < dq_max。
+    def test_check_step_position_mode_no_dq_max(self) -> None:
+        """位置模式 check_step_feasibility 不再检查 dq_max（已移除）。
 
-        力矩模式仍检查 u_min/u_max。
+        dq_max 曾限制 |u-q| 导致 PD 力矩被截断到 Kp*dq_max≈1.6 Nm。
+        修复后位置模式仅检查 u 在 ctrlrange（关节范围）内，力矩限制由 step() 软件裁剪。
         """
         from src.ilqt.robot_limits import check_step_feasibility
 
@@ -571,12 +572,7 @@ class TestSafetyPositionMode:
         x_next = x_prev.copy()
         dt = 0.005
 
-        ok_torque, _ = check_step_feasibility(
-            x_prev, x_next, np.full(nq, 100.0), limits, dt,
-            actuator_mode=0,
-        )
-        assert ok_torque, "力矩模式 u=100 < u_max=150 应通过"
-
+        # 力矩模式仍检查 u_min/u_max
         ok_torque_over, reason = check_step_feasibility(
             x_prev, x_next, np.full(nq, 200.0), limits, dt,
             actuator_mode=0,
@@ -584,25 +580,20 @@ class TestSafetyPositionMode:
         assert not ok_torque_over, "力矩模式 u=200 > u_max=150 应拒绝"
         assert "u upper" in reason
 
+        # 位置模式：大 dq 应通过（dq_max 已移除）
         dq_max_val = limits.dq_max[0]
-
-        u_within = q + 0.5 * dq_max_val
-        ok_pos, _ = check_step_feasibility(
-            x_prev, x_next, u_within, limits, dt,
-            actuator_mode=1,
-        )
-        assert ok_pos, f"位置模式 dq={0.5*dq_max_val:.4f} < dq_max={dq_max_val:.4f} 应通过"
-
         u_over = q + 2.0 * dq_max_val
-        ok_pos_over, reason_pos = check_step_feasibility(
+        ok_pos, _ = check_step_feasibility(
             x_prev, x_next, u_over, limits, dt,
             actuator_mode=1,
         )
-        assert not ok_pos_over, f"位置模式 dq={2.0*dq_max_val:.4f} > dq_max 应拒绝"
-        assert "dq limit" in reason_pos
+        assert ok_pos, "位置模式 dq_max 已移除，大 dq 不应被拒绝"
 
-    def test_strict_braking_position_mode(self) -> None:
-        """位置模式 strict_braking_check 使用 dq_max 约束。"""
+    def test_strict_braking_position_mode_no_dq_max(self) -> None:
+        """位置模式 strict_braking_check 不再检查 dq_max（已移除）。
+
+        力矩模式仍检查 u_min/u_max。
+        """
         from src.ilqt.robot_limits import strict_braking_check
 
         limits = self._make_limits()
@@ -612,12 +603,7 @@ class TestSafetyPositionMode:
         x_next = x_prev.copy()
         dt = 0.005
 
-        ok_torque, _ = strict_braking_check(
-            x_prev, x_next, np.full(nq, 100.0), limits, dt,
-            actuator_mode=0,
-        )
-        assert ok_torque, "力矩模式 strict_braking u=100 应通过"
-
+        # 力矩模式仍检查 u_min/u_max
         ok_torque_over, reason = strict_braking_check(
             x_prev, x_next, np.full(nq, 200.0), limits, dt,
             actuator_mode=0,
@@ -625,24 +611,20 @@ class TestSafetyPositionMode:
         assert not ok_torque_over, "力矩模式 strict_braking u=200 应拒绝"
         assert "u upper" in reason
 
+        # 位置模式：大 dq 应通过（dq_max 已移除）
         dq_max_val = limits.dq_max[0]
         u_over = q + 2.0 * dq_max_val
-        ok_pos_over, reason_pos = strict_braking_check(
+        ok_pos, _ = strict_braking_check(
             x_prev, x_next, u_over, limits, dt,
             actuator_mode=1,
         )
-        assert not ok_pos_over, "位置模式 strict_braking dq 超限应拒绝"
-        assert "dq limit" in reason_pos
-
-        u_within = q + 0.5 * dq_max_val
-        ok_pos, _ = strict_braking_check(
-            x_prev, x_next, u_within, limits, dt,
-            actuator_mode=1,
-        )
-        assert ok_pos, "位置模式 strict_braking dq 内应通过"
+        assert ok_pos, "位置模式 strict_braking dq_max 已移除，大 dq 不应被拒绝"
 
     def test_check_one_step_reads_actuator_mode_from_env(self) -> None:
-        """check_one_step_feasibility 从 env 自动读取 actuator_mode。"""
+        """check_one_step_feasibility 从 env 自动读取 actuator_mode。
+
+        位置模式不再使用 dq_max，大 dq 应通过（力矩由 step() 软件裁剪保证安全）。
+        """
         from src.ilqt.robot_limits import check_one_step_feasibility
 
         env = _make_env()
@@ -665,8 +647,7 @@ class TestSafetyPositionMode:
             x0, u_over, limits, env.dt,
             step_predictor=_step, env=env,
         )
-        assert not ok, "env 位置模式下应使用 dq_max 检查"
-        assert "dq limit" in reason
+        assert ok, "位置模式 dq_max 已移除，大 dq 不应被拒绝"
 
 
 # ==============================================================================
@@ -995,3 +976,99 @@ class TestV11Integration:
             "RobotLimits 日志未标记 POSITION MODE"
         assert "dq_max" in combined, \
             "位置模式日志未输出 dq_max 信息"
+
+
+class TestPositionModeDqMaxFix:
+    """dq_max 修复后位置模式不再被安全滤波器阻塞。
+
+    修复方案 A+C：
+    - A: 移除位置模式 dq_max 检查（qdot 检查已覆盖安全）
+    - C: 在 step() 中软件层裁剪位置误差 |u-q| ≤ torque_max/Kp，
+         等效于 forcerange（MuJoCo 运行时 forcerange 不生效）
+    """
+
+    def test_large_position_command_not_rejected_by_check_step(self) -> None:
+        """大位置命令（|u-q|=2 rad）经力矩裁剪后不应被 check_step_feasibility 拒绝。
+
+        裁剪后 |u-q| ≤ 60/200 = 0.3 rad → PD 力矩 ≤ 60 Nm → qdot ≤ ~1.4 rad/s < 2.83。
+        """
+        from src.ilqt.robot_limits import RobotLimits, check_step_feasibility
+
+        env = _make_env()
+        kp = np.array([200.0, 200.0, 200.0, 50.0, 50.0, 20.0])
+        kd = np.array([20.0, 20.0, 20.0, 5.0, 5.0, 2.0])
+        env.configure_actuator_mode("position", kp=kp, kd=kd)
+        env.reset(q0=np.zeros(6))
+
+        limits = RobotLimits.from_config({}, dt=env.dt,
+                                          ctrlrange=env.model.actuator_ctrlrange[:env.NU])
+
+        # 构造大位置误差场景：q=0, u=2 rad，经 step() 裁剪后 |u-q|=0.3 rad
+        x_prev = np.zeros(12)
+        u_try = np.array([2.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        x_next = env.step_from_state(x_prev, u_try)
+
+        ok, reason = check_step_feasibility(
+            x_prev, x_next, u_try, limits, env.dt,
+            actuator_mode=1,
+        )
+        assert ok, f"大位置命令不应被拒绝: {reason}"
+
+    def test_large_position_command_not_rejected_by_strict_braking(self) -> None:
+        """大位置命令经力矩裁剪后不应被 strict_braking_check 拒绝。"""
+        from src.ilqt.robot_limits import RobotLimits, strict_braking_check
+
+        env = _make_env()
+        kp = np.array([200.0, 200.0, 200.0, 50.0, 50.0, 20.0])
+        kd = np.array([20.0, 20.0, 20.0, 5.0, 5.0, 2.0])
+        env.configure_actuator_mode("position", kp=kp, kd=kd)
+        env.reset(q0=np.zeros(6))
+
+        limits = RobotLimits.from_config({}, dt=env.dt,
+                                          ctrlrange=env.model.actuator_ctrlrange[:env.NU])
+
+        x_prev = np.zeros(12)
+        u_try = np.array([2.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        x_next = env.step_from_state(x_prev, u_try)
+
+        ok, reason = strict_braking_check(
+            x_prev, x_next, u_try, limits, env.dt,
+            actuator_mode=1,
+        )
+        assert ok, f"大位置命令不应被 strict_braking 拒绝: {reason}"
+
+    def test_step_torque_clipping_in_position_mode(self) -> None:
+        """位置模式 step() 应裁剪位置误差，等效于 forcerange。
+
+        u=2 rad, q=0, Kp=200, torque_max=60 → 裁剪后 u_eff=0.3 rad → PD 力矩=60 Nm。
+        力矩模式下 step() 不应裁剪。
+        """
+        env = _make_env()
+        torque_ctrlrange = env._torque_ctrlrange.copy()
+
+        # 位置模式
+        kp = np.array([200.0, 200.0, 200.0, 50.0, 50.0, 20.0])
+        kd = np.array([20.0, 20.0, 20.0, 5.0, 5.0, 2.0])
+        env.configure_actuator_mode("position", kp=kp, kd=kd)
+        env.reset(q0=np.zeros(6))
+
+        x_prev = np.zeros(12)
+        u_try = np.array([2.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        env.step_from_state(x_prev, u_try)
+
+        # 力矩应被裁剪到 ctrlrange
+        actual_force = abs(env.data.actuator_force[0])
+        assert actual_force <= torque_ctrlrange[0, 1] + 1e-6, \
+            f"位置模式 PD 力矩 {actual_force:.2f} 应 ≤ {torque_ctrlrange[0, 1]:.1f} Nm"
+
+    def test_no_clipping_in_torque_mode(self) -> None:
+        """力矩模式 step() 不应裁剪位置误差（直接力矩控制）。"""
+        env = _make_env()
+        torque_ctrlrange = env._torque_ctrlrange.copy()
+
+        env.reset(q0=np.zeros(6))
+        u_try = np.array([50.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        env.step(u_try)
+
+        # 力矩模式直接施加，actuator_force 应等于 ctrl（在 ctrlrange 内）
+        np.testing.assert_allclose(env.data.actuator_force[0], 50.0, atol=1e-6)

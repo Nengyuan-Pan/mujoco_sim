@@ -75,6 +75,7 @@ class RM65Env:
         self._torque_gainprm = self.model.actuator_gainprm[:self.NU].copy()
         self._torque_biasprm = self.model.actuator_biasprm[:self.NU].copy()
         self._torque_biastype = self.model.actuator_biastype[:self.NU].copy()
+        self._torque_forcerange = self.model.actuator_forcerange[:self.NU].copy()
         self._actuator_mode: int = 0  # 0=力矩, 1=位置
         self._kp: np.ndarray | None = None
         self._kd: np.ndarray | None = None
@@ -143,18 +144,29 @@ class RM65Env:
         mujoco.mj_kinematics(self.model, self.data)
 
     def step(self, u: np.ndarray) -> np.ndarray:
-        """施加右臂控制力矩并前进一步。
+        """施加右臂控制并前进一步。
 
-        同时保持左臂零位（PD 控制器 + 位置归零），防止碰撞推力导致漂移。
+        力矩模式: u = 力矩，直接写入 ctrl。
+        位置模式: u = 期望角度，裁剪位置误差 |u-q| ≤ torque_max/Kp 后写入 ctrl，
+                  等效于 MuJoCo forcerange（运行时 forcerange 不生效，用软件层替代）。
 
         Args:
-            u: 右臂关节力矩，形状 (6,)。
+            u: 右臂控制输入，形状 (6,)。力矩模式为力矩，位置模式为期望角度。
 
         Returns:
             新的右臂状态，形状 (12,)。
         """
         ctrl_range = self.model.actuator_ctrlrange[: self.NU]
         u_clipped = np.clip(u, ctrl_range[:, 0], ctrl_range[:, 1])
+
+        # 位置模式：裁剪位置误差，等效于 forcerange 力矩限制
+        if self._actuator_mode == 1 and self._kp is not None:
+            q_now = self.data.qpos[: self.NQ].copy()
+            max_err = np.abs(self._torque_ctrlrange[:, 1]) / self._kp
+            err = u_clipped - q_now
+            err_clipped = np.clip(err, -max_err, max_err)
+            u_clipped = q_now + err_clipped
+
         self.data.ctrl[: self.NU] = u_clipped
         # 先强制左臂位置和速度，再计算 PD（此时误差为 0，ctrl=0）
         self.data.qpos[self.NQ: self.NQ + self.LEFT_ARM_NQ] = self.init_q_left
@@ -420,6 +432,7 @@ class RM65Env:
             self.model.actuator_gainprm[:self.NU] = self._torque_gainprm
             self.model.actuator_biasprm[:self.NU] = self._torque_biasprm
             self.model.actuator_biastype[:self.NU] = self._torque_biastype
+            self.model.actuator_forcerange[:self.NU] = self._torque_forcerange
             self._kp = None
             self._kd = None
 

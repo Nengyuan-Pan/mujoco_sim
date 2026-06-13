@@ -1927,6 +1927,12 @@ def main() -> None:
                         help="观测门控启用 KF 滤波")
     parser.add_argument("--position-mode", action="store_true",
                         help="启用位置控制模式（u=q_desired，PD执行器）")
+    parser.add_argument("--kp", type=float, nargs='+', default=None,
+                        help="位置模式 PD 增益 Kp，6 个值覆盖配置文件")
+    parser.add_argument("--kd", type=float, nargs='+', default=None,
+                        help="位置模式 PD 增益 Kd，6 个值覆盖配置文件")
+    parser.add_argument("--dq-max-fraction", type=float, default=None,
+                        help="单步角度变化系数，覆盖配置文件默认 0.5")
     args = parser.parse_args()
 
     # 推导消融模式：--ablation 优先，否则从旧 flag 映射
@@ -2065,6 +2071,10 @@ def main() -> None:
     if is_position_mode:
         kp_cfg = np.array(actuator_cfg.get("kp", [200.0, 200.0, 200.0, 50.0, 50.0, 20.0]), dtype=np.float64)
         kd_cfg = np.array(actuator_cfg.get("kd", [20.0, 20.0, 5.0, 5.0, 5.0, 2.0]), dtype=np.float64)
+        if args.kp is not None:
+            kp_cfg = np.full(6, args.kp[0], dtype=np.float64) if len(args.kp) == 1 else np.array(args.kp, dtype=np.float64)
+        if args.kd is not None:
+            kd_cfg = np.full(6, args.kd[0], dtype=np.float64) if len(args.kd) == 1 else np.array(args.kd, dtype=np.float64)
         use_r_decay = False
         logger.info(f"[actuator] 位置模式: kp={kp_cfg.tolist()}, kd={kd_cfg.tolist()}")
 
@@ -2095,6 +2105,8 @@ def main() -> None:
             rl_cfg["max_tcp_speed"] = args.max_tcp
     if args.terminal_exempt_steps is not None:
         rl_cfg["terminal_exempt_steps"] = args.terminal_exempt_steps
+    if args.dq_max_fraction is not None:
+        rl_cfg["dq_max_fraction"] = args.dq_max_fraction
     robot_limits = RobotLimits.from_config(
         rl_cfg, dt=dt,
         ctrlrange=env.model.actuator_ctrlrange[:env.NU],
