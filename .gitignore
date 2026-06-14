@@ -18,6 +18,9 @@ paper/
 reference/
 plans/
 .codegraph/
+MJMODEL.TXT
+MJDATA.TXT
+MUJOCO_LOG.TXT
 *.mp4
 *.avi
 src/cpp/*.so
