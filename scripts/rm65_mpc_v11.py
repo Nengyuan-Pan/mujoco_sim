@@ -2807,20 +2807,23 @@ def main() -> None:
 
     async_mode = args.async_replan
 
-    # 观测门控初始化（exp9: 低频观测实验）
+    # 观测门控初始化（exp9: 低频观测实验；噪声参数 > 0 时自动启用全频门控）
     obs_gate = None
-    if args.obs_freq > 0:
+    _obs_freq_eff = args.obs_freq if args.obs_freq > 0 else (
+        1.0 / dt if (args.obs_noise_pos > 0 or args.obs_noise_vel > 0) else 0
+    )
+    if _obs_freq_eff > 0:
         from src.perception.ball_obs_gate import BallObservationGate
         from src.perception.ball_estimator import BallEstimator as _BE
         _obs_kf = None
         if args.obs_use_kf:
             _obs_kf = _BE(dt=dt, pos_noise_std=args.obs_noise_pos, vel_noise_std=args.obs_noise_vel)
         obs_gate = BallObservationGate(
-            args.obs_freq, dt,
+            _obs_freq_eff, dt,
             noise_pos=args.obs_noise_pos, noise_vel=args.obs_noise_vel,
             kf=_obs_kf, rng=rng,
         )
-        logger.info(f"[obs_gate] freq={args.obs_freq}Hz interval={obs_gate.obs_interval} "
+        logger.info(f"[obs_gate] freq={_obs_freq_eff:.0f}Hz interval={obs_gate.obs_interval} "
                     f"noise=({args.obs_noise_pos},{args.obs_noise_vel}) kf={args.obs_use_kf}")
 
     def _get_ball_state_gated(step: int):
