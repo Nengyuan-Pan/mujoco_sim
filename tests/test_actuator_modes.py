@@ -1117,4 +1117,190 @@ class TestApplyControlBeta:
         u = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         q = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         result = apply_control_beta(u, q, 0.5, is_position=True)
-        np.testing.assert_allclose(result, np.array([0.5, 0.0, 0.0, 0.0, 0.0, 0.0]))
+        np.testing.assert_allclose(result, 0.5 * u)
+
+
+class TestFeedforward:
+    """前馈补偿（重力+科氏力）测试。"""
+
+    def test_feedforward_applies_gravity_at_rest(self) -> None:
+        """位置模式+前馈：静止状态下 qfrc_applied ≈ mj_rne 偏置力。
+
+        设定非零关节角（重力矩显著），step(q_current) 后
+        qfrc_applied[:6] 应匹配 mj_rne 在该状态的输出。
+        """
+        env = _make_env()
+        kp = np.array([20.0] * 6)
+        kd = np.array([1.6] * 6)
+        env.configure_actuator_mode("position", kp=kp, kd=kd)
+
+        # 非零姿态：joint2=0.5 使肩部产生重力矩
+        q = np.array([0.0, 0.5, 0.3, 0.0, 0.0, 0.0])
+        x = np.concatenate([q, np.zeros(6)])
+        env.set_arm_state(x)
+
+        # 手动计算 mj_rne 期望值
+        expected_bias = np.zeros(env.model.nv)
+        mujoco.mj_rne(env.model, env.data, 0, expected_bias)
+
+        env.step(q)  # q_desired = q_current，PD 误差为零
+
+        np.testing.assert_allclose(
+            env.data.qfrc_applied[:env.NQ], expected_bias[:env.NQ],
+            atol=1e-6,
+            err_msg="前馈补偿力矩应匹配 mj_rne 偏置力",
+        )
+
+    def test_torque_mode_qfrc_applied_zero(self) -> None:
+        """力矩模式 step 后 qfrc_applied 始终为 0。
+
+        即使之前用过位置模式+前馈，切回力矩模式后 qfrc_applied 应清零。
+        """
+        env = _make_env()
+        kp = np.array([20.0] * 6)
+        kd = np.array([1.6] * 6)
+
+        # 先切位置模式+前馈，产生非零 qfrc_applied
+        env.configure_actuator_mode("position", kp=kp, kd=kd)
+        env.reset(q0=np.array([0.0, 0.5, 0.3, 0.0, 0.0, 0.0]))
+        env.step(np.zeros(6))
+        assert np.any(env.data.qfrc_applied[:env.NQ] != 0), \
+            "前置条件：位置模式+前馈应产生非零 qfrc_applied"
+
+        # 切回力矩模式
+        env.configure_actuator_mode("torque")
+        env.step(np.zeros(6))
+
+        np.testing.assert_allclose(
+            env.data.qfrc_applied[:env.NQ], 0.0, atol=1e-12,
+            err_msg="力矩模式 qfrc_applied 必须为 0",
+        )
+
+    def test_feedforward_reduces_tracking_error(self) -> None:
+        """前馈在准静态下消除重力下垂。
+
+        设定臂在目标位置静止（q=q_target, qdot=0），step(q_target) 一步后：
+        - 有前馈：PD 误差=0，qfrc_applied=h(q,0)，合力 ≈ 0 → 几乎不动
+        - 无前馈：PD 误差=0，合力 = -h(q,0) → 因重力下垂
+
+        注意：禁用碰撞以匹配 MPC rollout 的生产环境行为。
+        """
+        q_target = np.array([0.0, 0.5, 0.3, 0.0, 0.0, 0.0])
+        kp = np.array([20.0] * 6)
+        kd = np.array([1.6] * 6)
+
+        # 无前馈：从目标位置出发，一步后的位移
+        env_noff = _make_env()
+        env_noff.configure_actuator_mode("position", kp=kp, kd=kd)
+        env_noff.configure_feedforward(False)
+        env_noff.reset(q0=q_target)
+        env_noff.set_arm_collision(False)
+        x0 = np.concatenate([q_target, np.zeros(6)])
+        env_noff.set_arm_state(x0)
+        env_noff.step(q_target)
+        droop_noff = np.abs(env_noff.get_arm_state()[:6] - q_target)
+
+        # 有前馈：同样从目标位置出发
+        env_ff = _make_env()
+        env_ff.configure_actuator_mode("position", kp=kp, kd=kd)
+        env_ff.reset(q0=q_target)
+        env_ff.set_arm_collision(False)
+        env_ff.set_arm_state(x0)
+        env_ff.step(q_target)
+        droop_ff = np.abs(env_ff.get_arm_state()[:6] - q_target)
+
+        max_droop_noff = np.max(droop_noff)
+        max_droop_ff = np.max(droop_ff)
+        assert max_droop_ff < max_droop_noff / 5.0, (
+            f"前馈一步下垂 ({max_droop_ff:.6f}) 应 < 无前馈的 1/5 "
+            f"({max_droop_noff/5:.6f})，无前馈最大下垂 {max_droop_noff:.6f}"
+        )
+
+    def test_linearize_feedforward_skips_Hq(self) -> None:
+        """前馈模式下线性化 A 矩阵跳过 H_q/H_qdot 项。
+
+        无前馈: A_c[nv:,:nv] = -M⁻¹*(H_q + diag(Kp))
+        有前馈: A_c[nv:,:nv] = -M⁻¹*diag(Kp)  (H_q 被前馈抵消)
+
+        验证：有前馈的 A 矩阵与无前馈的不同，
+        且有前馈的 A_c[nv:,:nv] 精确匹配 -M⁻¹*diag(Kp)。
+        """
+        env = _make_env()
+        kp = np.array([20.0] * 6)
+        kd = np.array([1.6] * 6)
+        env.configure_actuator_mode("position", kp=kp, kd=kd)
+
+        q = np.array([0.0, 0.5, 0.3, 0.0, 0.0, 0.0])
+        qdot = np.array([0.1, -0.2, 0.05, 0.0, 0.0, 0.0])
+        x = np.concatenate([q, qdot])
+        u = q.copy()
+
+        # 无前馈线性化
+        A_noff, B_noff, _ = linearize_analytical(
+            env, x, u, actuator_mode=1, kp=kp, kd=kd,
+            use_feedforward=False,
+        )
+
+        # 有前馈线性化
+        A_ff, B_ff, _ = linearize_analytical(
+            env, x, u, actuator_mode=1, kp=kp, kd=kd,
+            use_feedforward=True,
+        )
+
+        # A 矩阵应不同（H_q 项被跳过）
+        assert not np.allclose(A_noff, A_ff), \
+            "前馈模式 A 矩阵应与无前馈不同（跳过了 H_q/H_qdot）"
+
+        # B 矩阵应相同（B 不含 H_q）
+        np.testing.assert_allclose(B_noff, B_ff, atol=1e-10,
+                                   err_msg="B 矩阵不应受前馈影响")
+
+    def test_configure_feedforward_clears_qfrc(self) -> None:
+        """configure_feedforward(False) 清除 qfrc_applied。"""
+        env = _make_env()
+        kp = np.array([20.0] * 6)
+        kd = np.array([1.6] * 6)
+        env.configure_actuator_mode("position", kp=kp, kd=kd)
+        env.reset(q0=np.array([0.0, 0.5, 0.3, 0.0, 0.0, 0.0]))
+        env.step(np.zeros(6))
+        assert np.any(env.data.qfrc_applied[:env.NQ] != 0), \
+            "前置条件：位置模式+前馈应有非零 qfrc_applied"
+
+        env.configure_feedforward(False)
+
+        np.testing.assert_allclose(env.data.qfrc_applied[:env.NQ], 0.0,
+                                   atol=1e-12)
+        assert env.use_feedforward is False
+
+    def test_feedforward_nonzero_velocity(self) -> None:
+        """非零速度/加速度下前馈力仍仅包含偏置力（不含 M*qacc 残留）。
+
+        从非零 qdot 出发 step，验证 qfrc_applied 匹配该状态下的
+        mj_rne（含科氏力），而非 mj_rne + M*qacc_prev。
+        """
+        env = _make_env()
+        env.set_arm_collision(False)
+        kp = np.array([20.0] * 6)
+        kd = np.array([1.6] * 6)
+        env.configure_actuator_mode("position", kp=kp, kd=kd)
+
+        q = np.array([0.0, 0.5, 0.3, 0.0, 0.0, 0.0])
+        qdot = np.array([0.5, -0.3, 0.8, -0.2, 0.4, -0.6])
+        x = np.concatenate([q, qdot])
+        env.reset(q0=q)
+        env.set_arm_state(x)
+
+        # 手动计算期望偏置力（含科氏力）
+        env.data.qacc[:] = 0.0
+        expected_bias = np.zeros(env.model.nv)
+        mujoco.mj_rne(env.model, env.data, 0, expected_bias)
+
+        # step 会触发 mj_step→mj_forward 产生非零 qacc，
+        # 但前馈代码应先清零 qacc 再调 mj_rne
+        env.step(q)
+
+        np.testing.assert_allclose(
+            env.data.qfrc_applied[:env.NQ], expected_bias[:env.NQ],
+            atol=1e-6,
+            err_msg="非零速度下前馈力应仅含偏置力（不含 M*qacc 残留）",
+        )

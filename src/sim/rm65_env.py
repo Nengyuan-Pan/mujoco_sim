@@ -79,6 +79,7 @@ class RM65Env:
         self._actuator_mode: int = 0  # 0=力矩, 1=位置
         self._kp: np.ndarray | None = None
         self._kd: np.ndarray | None = None
+        self._use_feedforward: bool = False  # 前馈补偿（仅位置模式生效）
 
     def observe(self) -> tuple[np.ndarray, np.ndarray]:
         """推进观测处理管线：MuJoCo → preprocessor → KF → 缓存。
@@ -177,6 +178,17 @@ class RM65Env:
         l_ctrl_range = self.model.actuator_ctrlrange[self.NU: self.NU + self.LEFT_ARM_NQ]
         l_tau = np.clip(l_tau, l_ctrl_range[:, 0], l_ctrl_range[:, 1])
         self.data.ctrl[self.NU: self.NU + self.LEFT_ARM_NQ] = l_tau
+
+        # 前馈补偿：位置模式下计算偏置力 h(q,qdot) = C*qdot + g(q)
+        # 施加到 qfrc_applied，使 PD 控制器无需对抗重力/科氏力
+        if self._actuator_mode == 1 and self._use_feedforward:
+            self.data.qacc[:] = 0.0  # 确保 mj_rne 仅返回偏置力（不含 M*qacc）
+            tau_bias = np.zeros(self.model.nv)
+            mujoco.mj_rne(self.model, self.data, 0, tau_bias)
+            self.data.qfrc_applied[:self.NQ] = tau_bias[:self.NQ]
+        else:
+            self.data.qfrc_applied[:self.NQ] = 0.0
+
         mujoco.mj_step(self.model, self.data)
         self._cached_ball_state = None  # 球物理状态已变，缓存作废
         self._handle_ball_bounce()
@@ -410,6 +422,25 @@ class RM65Env:
         """位置模式速度增益，形状 (6,)。力矩模式下为 None。"""
         return self._kd
 
+    @property
+    def use_feedforward(self) -> bool:
+        """位置模式下是否启用前馈补偿（重力+科氏力）。"""
+        return self._use_feedforward
+
+    def configure_feedforward(self, enabled: bool) -> None:
+        """启用或禁用前馈补偿。
+
+        位置模式下启用后，step() 会在 mj_step() 前计算 mj_rne 偏置力
+        并施加到 qfrc_applied，使 PD 控制器无需对抗重力/科氏力。
+        禁用时清除 qfrc_applied。
+
+        Args:
+            enabled: True=启用前馈补偿, False=禁用。
+        """
+        self._use_feedforward = enabled
+        if not enabled:
+            self.data.qfrc_applied[:self.NQ] = 0.0
+
     def configure_actuator_mode(
         self,
         mode: str,
@@ -435,6 +466,8 @@ class RM65Env:
             self.model.actuator_forcerange[:self.NU] = self._torque_forcerange
             self._kp = None
             self._kd = None
+            self._use_feedforward = False
+            self.data.qfrc_applied[:self.NQ] = 0.0
 
         elif mode == "position":
             if kp is None or kd is None:
@@ -444,6 +477,7 @@ class RM65Env:
             self._actuator_mode = 1
             self._kp = kp.copy()
             self._kd = kd.copy()
+            self._use_feedforward = True
 
             for i in range(self.NU):
                 self.model.actuator_gainprm[i, 0] = kp[i]
@@ -473,6 +507,7 @@ class RM65Env:
             target_env.configure_actuator_mode("torque")
         else:
             target_env.configure_actuator_mode("position", self._kp, self._kd)
+            target_env.configure_feedforward(self._use_feedforward)
 
     def step_full(self, u: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """施加控制力矩并前进一步，返回右臂状态和球状态。
@@ -496,6 +531,7 @@ class RM65Env:
         qpos_save = self.data.qpos.copy()
         qvel_save = self.data.qvel.copy()
         ctrl_save = self.data.ctrl.copy()
+        qfrc_applied_save = self.data.qfrc_applied.copy()
 
         bq = self.BALL_QPOS_START
         bv = self.BALL_QVEL_START
@@ -525,6 +561,7 @@ class RM65Env:
             self.data.qpos[NQ:NQ + self.LEFT_ARM_NQ] = self.init_q_left
             self.data.qvel[NQ:NQ + self.LEFT_ARM_NQ] = 0.0
             self.data.ctrl[:] = 0.0
+            self.data.qfrc_applied[:] = 0.0  # 预测期间清除前馈力
 
             mujoco.mj_step(self.model, self.data)
             self._handle_ball_bounce()
@@ -538,6 +575,7 @@ class RM65Env:
         self.data.qpos[:] = qpos_save
         self.data.qvel[:] = qvel_save
         self.data.ctrl[:] = ctrl_save
+        self.data.qfrc_applied[:] = qfrc_applied_save
         mujoco.mj_forward(self.model, self.data)
 
         return positions, velocities

@@ -1928,6 +1928,8 @@ def main() -> None:
                         help="观测门控启用 KF 滤波")
     parser.add_argument("--position-mode", action="store_true",
                         help="启用位置控制模式（u=q_desired，PD执行器）")
+    parser.add_argument("--no-feedforward", action="store_true",
+                        help="禁用前馈补偿（默认位置模式启用重力/科氏力补偿）")
     parser.add_argument("--kp", type=float, nargs='+', default=None,
                         help="位置模式 PD 增益 Kp，6 个值覆盖配置文件")
     parser.add_argument("--kd", type=float, nargs='+', default=None,
@@ -2096,6 +2098,12 @@ def main() -> None:
     env.init_q_left = init_q_left
     if is_position_mode:
         env.configure_actuator_mode("position", kp=kp_cfg, kd=kd_cfg)
+        use_ff_cfg = actuator_cfg.get("feedforward", True)
+        if args.no_feedforward or not use_ff_cfg:
+            env.configure_feedforward(False)
+            logger.info("[FEEDFORWARD] 已禁用")
+        else:
+            logger.info("[FEEDFORWARD] 已启用（重力+科氏力补偿）")
 
     # 加载真实机器人硬约束
     rl_cfg = config_dict.get("robot_limits", {})

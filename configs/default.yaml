@@ -113,10 +113,12 @@ robot_limits:
 # 执行器模式配置
 actuator:
   mode: "torque"             # "torque" 或 "position"
-  # exp10 精调最优参数（uniform 比例, Kp=20, Kd_ratio=0.08）
-  # 3360 runs 验证：100% 命中率，pos_err=52mm，TCP=2.51 m/s
-  kp: [20.0, 20.0, 20.0, 20.0, 20.0, 20.0]
-  kd: [1.6, 1.6, 1.6, 1.6, 1.6, 1.6]
+  # exp12 前馈评估最优参数（uniform 比例, Kp=25, Kd_ratio=0.08, FF on）
+  # 1900 runs 验证：100% 命中率 @ 7m/s, pos_err=50mm, TCP=1.79 m/s
+  # pos_ff vs pos_noff: +10.4pp 命中率提升（exp12 Phase A）
+  kp: [25.0, 25.0, 25.0, 25.0, 25.0, 25.0]
+  kd: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+  feedforward: true          # 位置模式启用前馈补偿（重力+科氏力，匹配真机内置补偿）
 
 # 可视化参数
 viewer:

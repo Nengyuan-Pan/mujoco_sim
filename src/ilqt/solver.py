@@ -51,9 +51,11 @@ class ILQTSolver:
             actuator_mode = getattr(env, 'actuator_mode', 0)
             kp = getattr(env, 'kp', None)
             kd = getattr(env, 'kd', None)
+            use_ff = getattr(env, 'use_feedforward', False)
             return linearize_analytical_trajectory(
                 env, X, U, self.lin_eps,
                 actuator_mode=actuator_mode, kp=kp, kd=kd,
+                use_feedforward=use_ff,
             )
         return linearize_trajectory(env, X, U, self.lin_eps)
 

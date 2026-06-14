@@ -54,6 +54,7 @@ void linearize_analytical_single(
     double eps, double dt,
     int actuator_mode,
     const double* kp, const double* kd,
+    bool use_feedforward,
     double* A_out, double* B_out, double* x_next_out)
 {
     set_arm_forward(m, d, x, x + kNQ, init_q_left);
@@ -73,54 +74,57 @@ void linearize_analytical_single(
     mjtNum h_base[30];
     mj_rne(m, d, 0, h_base);
 
-    // ---- 3. dh/dq (central differences, 6 perturbations) ----
+    // ---- 3-4. dh/dq, dh/dqdot（前馈模式跳过） ----
     double H_q[6][6] = {};
-    double q_save[6];
-    std::memcpy(q_save, d->qpos, 6 * sizeof(double));
-    for (int j = 0; j < 6; ++j) {
-        std::memcpy(d->qpos, q_save, 6 * sizeof(double));
-        d->qpos[j] += eps;
-        mj_forward(m, d);
-        std::memset(d->qacc, 0, m->nv * sizeof(mjtNum));
-        mjtNum h_plus[30];
-        mj_rne(m, d, 0, h_plus);
-
-        std::memcpy(d->qpos, q_save, 6 * sizeof(double));
-        d->qpos[j] -= eps;
-        mj_forward(m, d);
-        std::memset(d->qacc, 0, m->nv * sizeof(mjtNum));
-        mjtNum h_minus[30];
-        mj_rne(m, d, 0, h_minus);
-
-        for (int i = 0; i < 6; ++i)
-            H_q[i][j] = (h_plus[i] - h_minus[i]) / (2.0 * eps);
-    }
-    std::memcpy(d->qpos, q_save, 6 * sizeof(double));
-
-    // ---- 4. dh/dqdot (central differences, 6 perturbations) ----
     double H_qdot[6][6] = {};
-    double qd_save[6];
-    std::memcpy(qd_save, d->qvel, 6 * sizeof(double));
-    for (int j = 0; j < 6; ++j) {
-        std::memcpy(d->qvel, qd_save, 6 * sizeof(double));
-        d->qvel[j] += eps;
-        mj_forward(m, d);
-        std::memset(d->qacc, 0, m->nv * sizeof(mjtNum));
-        mjtNum h_plus[30];
-        mj_rne(m, d, 0, h_plus);
+    if (!use_feedforward) {
+        // dh/dq (central differences, 6 perturbations)
+        double q_save[6];
+        std::memcpy(q_save, d->qpos, 6 * sizeof(double));
+        for (int j = 0; j < 6; ++j) {
+            std::memcpy(d->qpos, q_save, 6 * sizeof(double));
+            d->qpos[j] += eps;
+            mj_forward(m, d);
+            std::memset(d->qacc, 0, m->nv * sizeof(mjtNum));
+            mjtNum h_plus[30];
+            mj_rne(m, d, 0, h_plus);
 
-        std::memcpy(d->qvel, qd_save, 6 * sizeof(double));
-        d->qvel[j] -= eps;
-        mj_forward(m, d);
-        std::memset(d->qacc, 0, m->nv * sizeof(mjtNum));
-        mjtNum h_minus[30];
-        mj_rne(m, d, 0, h_minus);
+            std::memcpy(d->qpos, q_save, 6 * sizeof(double));
+            d->qpos[j] -= eps;
+            mj_forward(m, d);
+            std::memset(d->qacc, 0, m->nv * sizeof(mjtNum));
+            mjtNum h_minus[30];
+            mj_rne(m, d, 0, h_minus);
 
-        for (int i = 0; i < 6; ++i)
-            H_qdot[i][j] = (h_plus[i] - h_minus[i]) / (2.0 * eps);
+            for (int i = 0; i < 6; ++i)
+                H_q[i][j] = (h_plus[i] - h_minus[i]) / (2.0 * eps);
+        }
+        std::memcpy(d->qpos, q_save, 6 * sizeof(double));
+
+        // dh/dqdot (central differences, 6 perturbations)
+        double qd_save[6];
+        std::memcpy(qd_save, d->qvel, 6 * sizeof(double));
+        for (int j = 0; j < 6; ++j) {
+            std::memcpy(d->qvel, qd_save, 6 * sizeof(double));
+            d->qvel[j] += eps;
+            mj_forward(m, d);
+            std::memset(d->qacc, 0, m->nv * sizeof(mjtNum));
+            mjtNum h_plus[30];
+            mj_rne(m, d, 0, h_plus);
+
+            std::memcpy(d->qvel, qd_save, 6 * sizeof(double));
+            d->qvel[j] -= eps;
+            mj_forward(m, d);
+            std::memset(d->qacc, 0, m->nv * sizeof(mjtNum));
+            mjtNum h_minus[30];
+            mj_rne(m, d, 0, h_minus);
+
+            for (int i = 0; i < 6; ++i)
+                H_qdot[i][j] = (h_plus[i] - h_minus[i]) / (2.0 * eps);
+        }
+        std::memcpy(d->qvel, qd_save, 6 * sizeof(double));
+        mj_forward(m, d);
     }
-    std::memcpy(d->qvel, qd_save, 6 * sizeof(double));
-    mj_forward(m, d);
 
     // ---- 5. Assemble A_c, B_c (mode-dependent) ----
     //

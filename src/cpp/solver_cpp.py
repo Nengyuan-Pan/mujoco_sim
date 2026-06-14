@@ -95,6 +95,7 @@ else:
 
         def _linearize(self, env, X, U):
             """线性化：C++ 解析 > Python 解析 > Python 有限差分。"""
+            use_ff = getattr(env, 'use_feedforward', False)
             if self.use_analytical and _CPP_AVAILABLE:
                 return self._linearize_cpp(env, X, U)
             if self.use_analytical:
@@ -104,6 +105,7 @@ else:
                 return linearize_analytical_trajectory(
                     env, X, U, self.lin_eps,
                     actuator_mode=actuator_mode, kp=kp, kd=kd,
+                    use_feedforward=use_ff,
                 )
             return linearize_trajectory(env, X, U, self.lin_eps)
 
@@ -126,12 +128,14 @@ else:
             actuator_mode = getattr(env, 'actuator_mode', 0)
             kp = getattr(env, 'kp', None)
             kd = getattr(env, 'kd', None)
+            use_ff = getattr(env, 'use_feedforward', False)
             linearize_analytical_batch(
                 A_all, B_all, x_next_all, X, U,
                 _get_model_ptr(env.model), _get_model_ptr(env.data),
                 env.init_q_left,
                 self.lin_eps, env.dt,
                 actuator_mode, kp, kd,
+                use_ff,
             )
             As = [A_all[k] for k in range(N)]
             Bs = [B_all[k] for k in range(N)]

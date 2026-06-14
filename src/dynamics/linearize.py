@@ -98,6 +98,7 @@ def linearize_analytical(
     actuator_mode: int = 0,
     kp: np.ndarray | None = None,
     kd: np.ndarray | None = None,
+    use_feedforward: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """使用 MuJoCo 解析函数线性化臂动力学。
 
@@ -113,14 +114,21 @@ def linearize_analytical(
       A_c = [0, I; -M^{-1}*H_q, -M^{-1}*H_qdot]
       B_c = [0; M^{-1}]
 
-    位置模式 (actuator_mode=1):
+    位置模式 (actuator_mode=1, use_feedforward=False):
       τ = Kp*(u - q) - Kd*qdot（PD 位置控制）
       A_c = [0, I; -M^{-1}*(H_q + diag(Kp)), -M^{-1}*(H_qdot + diag(Kd))]
       B_c = [0; M^{-1}*diag(Kp)]
 
+    位置模式+前馈 (actuator_mode=1, use_feedforward=True):
+      τ = Kp*(u - q) - Kd*qdot + h(q,qdot)（PD + 重力/科氏力补偿）
+      前馈抵消偏置力后等效动力学: M*q̈ = Kp*(u-q) - Kd*q̇
+      A_c = [0, I; -M^{-1}*diag(Kp), -M^{-1}*diag(Kd)]
+      B_c = [0; M^{-1}*diag(Kp)]
+      跳过 H_q/H_qdot 计算（约 50% 加速）。
+
     方法：
     1. mj_fullM 一次求 M（解析质量矩阵）
-    2. mj_rne 多次求 h 和其偏导数 H_q, H_q̇（中心差分）
+    2. mj_rne 多次求 h 和其偏导数 H_q, Ḣ（中心差分，前馈模式跳过）
     3. 组装 A_c, B_c 后用欧拉法离散化
 
     Args:
@@ -131,6 +139,7 @@ def linearize_analytical(
         actuator_mode: 0=力矩模式, 1=位置模式。
         kp: 位置模式比例增益 (6,)。位置模式时必填。
         kd: 位置模式微分增益 (6,)。位置模式时必填。
+        use_feedforward: 位置模式下是否启用前馈补偿。True 时跳过 H_q/H_qdot。
 
     Returns:
         (A, B, x_next): A (12,12), B (12,6), x_next (12,)。
@@ -158,62 +167,56 @@ def linearize_analytical(
     mujoco.mj_rne(model, data, 0, h_base)
     h_arm = h_base[:nv].copy()
 
-    # ---- 3. 计算 ∂h/∂q（中心差分） ----
+    # ---- 3-4. 计算 ∂h/∂q 和 ∂h/∂qdot（前馈模式跳过） ----
     H_q = np.zeros((nv, nv))
-    q_orig = data.qpos[:nv].copy()
-    for j in range(nv):
-        # 扰动 q[j] + eps
-        data.qpos[:nv] = q_orig.copy()
-        data.qpos[j] += eps
-        mujoco.mj_forward(model, data)
-        data.qacc[:] = 0.0
-        h_plus = np.zeros(model.nv)
-        mujoco.mj_rne(model, data, 0, h_plus)
-
-        # 扰动 q[j] - eps
-        data.qpos[:nv] = q_orig.copy()
-        data.qpos[j] -= eps
-        mujoco.mj_forward(model, data)
-        data.qacc[:] = 0.0
-        h_minus = np.zeros(model.nv)
-        mujoco.mj_rne(model, data, 0, h_minus)
-
-        H_q[:, j] = (h_plus[:nv] - h_minus[:nv]) / (2.0 * eps)
-
-    # 恢复 q
-    data.qpos[:nv] = q_orig
-    mujoco.mj_forward(model, data)
-
-    # ---- 4. 计算 ∂h/∂qdot（中心差分） ----
     H_qdot = np.zeros((nv, nv))
-    qdot_orig = data.qvel[:nv].copy()
-    for j in range(nv):
-        # 扰动 qdot[j] + eps
-        data.qvel[:nv] = qdot_orig.copy()
-        data.qvel[j] += eps
+    if not use_feedforward:
+        # ∂h/∂q（中心差分）
+        q_orig = data.qpos[:nv].copy()
+        for j in range(nv):
+            data.qpos[:nv] = q_orig.copy()
+            data.qpos[j] += eps
+            mujoco.mj_forward(model, data)
+            data.qacc[:] = 0.0
+            h_plus = np.zeros(model.nv)
+            mujoco.mj_rne(model, data, 0, h_plus)
+
+            data.qpos[:nv] = q_orig.copy()
+            data.qpos[j] -= eps
+            mujoco.mj_forward(model, data)
+            data.qacc[:] = 0.0
+            h_minus = np.zeros(model.nv)
+            mujoco.mj_rne(model, data, 0, h_minus)
+
+            H_q[:, j] = (h_plus[:nv] - h_minus[:nv]) / (2.0 * eps)
+        data.qpos[:nv] = q_orig
         mujoco.mj_forward(model, data)
-        data.qacc[:] = 0.0
-        h_plus = np.zeros(model.nv)
-        mujoco.mj_rne(model, data, 0, h_plus)
 
-        # 扰动 qdot[j] - eps
-        data.qvel[:nv] = qdot_orig.copy()
-        data.qvel[j] -= eps
+        # ∂h/∂qdot（中心差分）
+        qdot_orig = data.qvel[:nv].copy()
+        for j in range(nv):
+            data.qvel[:nv] = qdot_orig.copy()
+            data.qvel[j] += eps
+            mujoco.mj_forward(model, data)
+            data.qacc[:] = 0.0
+            h_plus = np.zeros(model.nv)
+            mujoco.mj_rne(model, data, 0, h_plus)
+
+            data.qvel[:nv] = qdot_orig.copy()
+            data.qvel[j] -= eps
+            mujoco.mj_forward(model, data)
+            data.qacc[:] = 0.0
+            h_minus = np.zeros(model.nv)
+            mujoco.mj_rne(model, data, 0, h_minus)
+
+            H_qdot[:, j] = (h_plus[:nv] - h_minus[:nv]) / (2.0 * eps)
+        data.qvel[:nv] = qdot_orig
         mujoco.mj_forward(model, data)
-        data.qacc[:] = 0.0
-        h_minus = np.zeros(model.nv)
-        mujoco.mj_rne(model, data, 0, h_minus)
-
-        H_qdot[:, j] = (h_plus[:nv] - h_minus[:nv]) / (2.0 * eps)
-
-    # 恢复 qdot
-    data.qvel[:nv] = qdot_orig
-    mujoco.mj_forward(model, data)
 
     # ---- 5. 组装连续时间 A_c, B_c（分模式） ----
-    # 公共部分：A_c = [0, I; -M^{-1}*H_q, -M^{-1}*H_qdot]
     A_c = np.zeros((n_x, n_x))
     A_c[:nv, nv:] = np.eye(nv)
+    # 前馈模式下 H_q=H_qdot=0，等效于跳过偏置力项
     A_c[nv:, :nv] = -M_inv @ H_q
     A_c[nv:, nv:] = -M_inv @ H_qdot
 
@@ -250,6 +253,7 @@ def linearize_analytical_trajectory(
     actuator_mode: int = 0,
     kp: np.ndarray | None = None,
     kd: np.ndarray | None = None,
+    use_feedforward: bool = False,
 ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
     """沿整条轨迹线性化动力学（解析法）。
 
@@ -261,6 +265,7 @@ def linearize_analytical_trajectory(
         actuator_mode: 0=力矩模式, 1=位置模式。
         kp: 位置模式比例增益 (6,)。
         kd: 位置模式微分增益 (6,)。
+        use_feedforward: 位置模式下是否启用前馈补偿。
 
     Returns:
         (As, Bs, fs): 每步的 A_k, B_k, f_k 列表，各长度 N。
@@ -274,6 +279,7 @@ def linearize_analytical_trajectory(
         A_k, B_k, f_k = linearize_analytical(
             env, X[k], U[k], eps,
             actuator_mode=actuator_mode, kp=kp, kd=kd,
+            use_feedforward=use_feedforward,
         )
         As.append(A_k)
         Bs.append(B_k)
