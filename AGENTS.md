@@ -343,16 +343,17 @@ mujoco_sim/
 
 ## 批量实验架构
 
-新增实验不再需要手动写 PowerShell 循环、处理编码问题、逐个提取结果。
-已有标准化的三层模板，复制参考文件后只改 3 个参数。
+新增实验采用**主 Agent 创建脚本 + experiment-runner subagent 启动**的分工模式。
+脚本模板参考见 `.opencode/skills/experiment-design/SKILL.md` § 脚本模板参考。
 
 ### 三层架构
 
-| 层 | 文件模板 | 职责 | 改什么 |
-|----|---------|------|--------|
-| 包装 | `scripts/_run_expX_*.py` | monkey-patch 约束 → 构建 sys.argv → 调主脚本 | 约束参数、独有 CLI flag（如 `--no-bounce`） |
-| 运行 | `scripts/run_expX_batch.py` | 遍历参数矩阵 → subprocess → UTF-8 日志 | `SPEEDS`、`SEEDS`、`TUBE_MODES` 三个列表 |
-| 提取 | `scripts/extract_expX_results.py` | regex 解析日志 → results.csv + 命中率汇总 | 离线/实时格式选择、额外指标 regex |
+| 层 | 文件模板 | 谁负责 | 职责 |
+|----|---------|--------|------|
+| 包装 | `scripts/exp/_run_expN_*.py` | 主 Agent | monkey-patch 约束 → 构建 sys.argv → 调主脚本 |
+| 运行 | `scripts/exp/run_expN_batch.py` | 主 Agent | 遍历参数矩阵 → subprocess → UTF-8 日志 |
+| 提取 | `scripts/extract/extract_expN_results.py` | 主 Agent | regex 解析日志 → results.csv + 命中率汇总 |
+| 启动 | tmux 后台 | experiment-runner subagent | mkdir → tmux new-session → 立即返回 |
 
 ### 参考实现（复制即改）
 
@@ -362,25 +363,12 @@ mujoco_sim/
 | 严格约束 + 离线 | `_run_exp1_exempt.py`（改 margin→1.0） | `run_exp2_v2_batch.py` | `extract_exp2_v2_results.py` |
 | 实时脚本（有 `__RESULT__`） | 不需要 | `run_exp1_batch.py` | `extract_exp2_results.py` |
 
-### 新建实验只需 3 步
+### 新建实验流程
 
-1. **建目录**：`experiment_data/expN_<name>/raw/` + `config.yaml`
-2. **复制包装**：从参考中选一个 `_run_expX_*.py`，改 `constraints` 和 `sys.argv` 中的独有 flag
-3. **改运行器**：复制 `run_expX_v3_batch.py`，改 `SPEEDS`、`SEEDS`、`TUBE_MODES` 三个列表
-
-提取脚本通常无需改动，直接复用对应格式的版本。
-
-### 已验证的效率
-
-| 指标 | 手动模式 | 批量模式 |
-|------|---------|---------|
-| 单次运行 | `python script.py args > log` | 自动 subprocess |
-| 多参循环 | PowerShell 手写嵌套循环 | 改一行列表 |
-| 日志编码 | Tee-Object 产生 UTF-16LE 乱码 | 统一 UTF-8 |
-| 并行加速 | 不支持 | `--workers 4`，540 runs 135min→15.6min |
-| 断点续传 | 手工跳过已跑组合 | `log_path.exists()` 自动跳过 |
-| 结果提取 | 手动 grep + Excel | 一条命令输出 CSV |
-| 3 次实验总计 | 预估 6+ 小时手工作业 | **实际 2 小时全自动** |
+1. **主 Agent 建目录 + 脚本**：创建 `experiment_data/expN_<name>/raw/` + `config.yaml`，编写包装/运行器/提取脚本（参考 `.opencode/skills/experiment-design/SKILL.md` § 脚本模板参考）
+2. **主 Agent dispatch subagent**：传入 `experiment_id`、`data_dir`、`raw_dir`、`batch_script`、`extract_script`、`workers` 6 个参数
+3. **subagent 启动 tmux**：执行 4 个 bash 命令（预检→mkdir→断点检查→tmux），立即返回确认信息
+4. **主 Agent 后续检查**：`test -f <DATA_DIR>/_.COMPLETE && echo DONE || echo RUNNING`
 
 ### 常见坑
 

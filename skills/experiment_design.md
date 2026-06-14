@@ -763,3 +763,200 @@ if __name__ == "__main__":
 1. 将 `experiment_report.md` 中的表格手动转录到对应 exp 目录的 CSV
 2. 补充缺失的 seed 级别数据（目前只有汇总，需要逐 seed 数据）
 3. 对比已有数据与重新运行的结果一致性
+
+---
+
+## § 脚本模板参考（主 Agent 创建实验脚本时使用）
+
+> 本节从 experiment-runner subagent 文档迁移而来。
+> 主 Agent 负责创建以下 3 个脚本 + config.yaml，然后 dispatch experiment-runner subagent 启动。
+
+### 参考实现（复制即改）
+
+| 用途 | 参考文件 |
+|------|---------|
+| 豁免约束包装 | `scripts/exp/_run_exp1_v3_exempt.py` |
+| 严格约束包装 | `scripts/exp/_run_exp2_v3_strict.py` |
+| 批量运行器 | `scripts/exp/run_exp2_v3_batch.py` |
+| 提取脚本（离线） | `scripts/extract/extract_exp2_v3_results.py` |
+| 提取脚本（实时） | `scripts/extract/extract_exp1_results.py` |
+| 默认约束参数 | `configs/default.yaml` |
+
+### 1. 包装脚本（`scripts/exp/_run_expN_<name>.py`）
+
+通过 monkey-patch 注入约束参数，然后调用主脚本。
+
+**关键**：monkey-patch 必须在 `import main_mod` **之前**。
+
+```python
+"""实验N 辅助包装脚本：<description>。"""
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+ball_speed = sys.argv[1]
+seed = sys.argv[2]
+use_tube = sys.argv[3]
+
+# === Monkey-patch（必须在 import main_mod 之前）===
+from src.ilqt.robot_limits import RobotLimits
+_orig_from_config = RobotLimits.from_config
+
+@classmethod
+def _patched(cls, config, dt, ctrlrange):
+    config = dict(config)
+    config["forward_pass_margin"] = <值>
+    config["qdot_scale"] = <值>
+    config["forward_pass_q_tol_deg"] = <值>
+    config["max_tcp_speed"] = <值>
+    return _orig_from_config(config, dt, ctrlrange)
+
+RobotLimits.from_config = _patched
+
+sys.argv = [
+    "rm65_mpc_tube_constraint.py",
+    "--serve-box",
+    "--ball-speed", ball_speed,
+    "--seed", seed,
+    "--use_tube", use_tube,
+    "--no-backswing",
+    "--no-plot",
+]
+
+import scripts.rm65_mpc_tube_constraint as main_mod  # noqa: E402
+main_mod.main()
+```
+
+实时 v5 模式：将 `import scripts.rm65_mpc_tube_constraint` 改为
+`import scripts.rm65_mpc_tube_constraint_realtime_v5`，并调整 `sys.argv`。
+
+### 2. 批量运行器（`scripts/exp/run_expN_<name>_batch.py`）
+
+遍历参数矩阵，`ProcessPoolExecutor` 并行运行，每次输出写入日志文件。
+
+```python
+"""批量运行 expN_<name> 实验（多进程并行）。"""
+import argparse, os, subprocess, sys, time
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+RAW_DIR = PROJECT_ROOT / "experiment_data" / "<experiment_id>" / "raw"
+WRAPPER = PROJECT_ROOT / "scripts" / "exp" / "_run_expN_<name>.py"
+PYTHON_EXE = str(Path(sys.executable))
+
+SPEEDS = [8, 9, 10]
+SEEDS = list(range(15))
+TUBE_MODES = ["true", "false"]
+
+def run_one(args):
+    speed, seed, tube = args
+    tag = f"speed{speed}_seed{seed}_tube_{tube}"
+    log_path = RAW_DIR / f"{tag}.log"
+    if log_path.exists():          # 断点续传
+        return tag, True
+    cmd = [PYTHON_EXE, str(WRAPPER), str(speed), str(seed), tube]
+    try:
+        result = subprocess.run(
+            cmd, cwd=str(PROJECT_ROOT), capture_output=True,
+            timeout=180, encoding="utf-8",
+            env={**os.environ, "PYTHONUTF8": "1"},
+        )
+        content = result.stderr if result.stderr.strip() else result.stdout
+        log_path.write_text(content, encoding="utf-8")
+        return tag, True
+    except subprocess.TimeoutExpired:
+        return tag, False
+    except Exception as e:
+        log_path.write_text(f"ERROR: {e}", encoding="utf-8")
+        return tag, False
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--workers", type=int, default=4)
+    args = parser.parse_args()
+    tasks = [(s, d, t) for s in SPEEDS for t in TUBE_MODES for d in SEEDS]
+    total = len(tasks)
+    print(f"<experiment_id>: {len(SPEEDS)} 球速 × {len(TUBE_MODES)} tube × {len(SEEDS)} seeds = {total} runs")
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+    t0 = time.time()
+    ok, failed = 0, 0
+    with ProcessPoolExecutor(max_workers=args.workers) as pool:
+        futures = {pool.submit(run_one, t): t for t in tasks}
+        for i, f in enumerate(as_completed(futures), 1):
+            tag, success = f.result()
+            if success: ok += 1
+            else: failed += 1
+            if i % 20 == 0 or i == total:
+                elapsed = time.time() - t0
+                print(f"[{i}/{total}] ok={ok} fail={failed} elapsed={elapsed:.0f}s")
+    print(f"完成: {ok} ok, {failed} failed, {(time.time()-t0)/60:.1f}min")
+
+if __name__ == "__main__":
+    main()
+```
+
+### 3. 提取脚本（`scripts/extract/extract_expN_<name>_results.py`）
+
+解析日志文件中的正则匹配结果，汇总为 `results.csv`。
+
+**离线脚本**匹配中文输出行（如 `球拍击球!`），**实时脚本**匹配 `__RESULT__` JSON 行。
+
+参考现有提取脚本适配 regex 即可。标准 CSV 列：
+
+```csv
+ball_speed, seed, use_tube, hit, status, pos_error, min_distance, max_qdot_ratio, max_tcp_speed, hit_type, mpc_steps, wall_time
+```
+
+### 4. config.yaml
+
+写入 `experiment_data/<experiment_id>/config.yaml`：
+
+```yaml
+experiment: <experiment_id>
+description: "<description>"
+purpose: "<purpose>"
+background: "<background>"
+comparison: "<comparison>"
+constraint_type: <exempt|strict|custom>
+seeds: <N>
+ball_speeds: [<speeds>]
+tube_modes: [<modes>]
+script_type: <offline|realtime_v5>
+extra_flags: [<flags>]
+workers: <N>
+constraints:
+  forward_pass_margin: <值>
+  qdot_scale: <值>
+  forward_pass_q_tol_deg: <值>
+  max_tcp_speed: <值>
+total_runs: <计算值>
+```
+
+### 5. 常见易错点
+
+| # | 易错点 | 处理 |
+|---|--------|------|
+| 1 | monkey-patch 不生效 | patch 必须在 `import main_mod` 之前 |
+| 2 | 离线脚本输出到 stderr | `result.stderr if result.stderr.strip() else result.stdout` |
+| 3 | 并行 worker >4 导致 segfault | 默认 4 worker，`--no-plot` 关闭渲染 |
+| 4 | 日志编码乱码 | `PYTHONUTF8=1` + `encoding="utf-8"` |
+| 5 | 单次超时 | `timeout=180`，超时记为失败 |
+| 6 | 实时脚本无 `__RESULT__` | 用实时专用提取脚本 |
+| 7 | conda activate 失败 | 直接用 `python`，不 activate |
+| 8 | tmux session 重名 | 先 `tmux kill-session -t <ID> 2>/dev/null` |
+
+### 6. Dispatch subagent
+
+主 Agent 创建完上述脚本后，dispatch experiment-runner subagent，传入：
+
+```
+experiment_id: expN_<name>
+data_dir: <绝对路径>/experiment_data/expN_<name>
+raw_dir: <绝对路径>/experiment_data/expN_<name>/raw
+batch_script: scripts/exp/run_expN_<name>_batch.py
+extract_script: scripts/extract/extract_expN_<name>_results.py
+workers: 4
+```
